@@ -1,0 +1,29 @@
+{
+  "name": "crystal-ball-network-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for the Crystal Ball Network magical marketplace powered by Claude AI",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/bot.js",
+    "dev": "node --watch src/bot.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "fantasy",
+    "marketplace",
+    "claude",
+    "ai",
+    "dnd"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.24.3",
+    "better-sqlite3": "^9.0.0",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "openai": "^6.8.1",
+    "uuid": "^9.0.1"
+  }
+}

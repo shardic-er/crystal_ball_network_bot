@@ -1,0 +1,6 @@
+node_modules/
+.env
+cbn_sessions.json
+cost_tracking.json
+*.log
+.DS_Store

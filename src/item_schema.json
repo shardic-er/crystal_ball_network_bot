@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CBN Item Response",
+  "type": "object",
+  "properties": {
+    "message": {
+      "type": "string",
+      "description": "Flavor text or introductory message from the CBN"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The item's name, including previous owner if applicable"
+          },
+          "itemType": {
+            "type": "string",
+            "description": "D&D item type (e.g., 'Wondrous item', 'Weapon (longsword)', 'Armor (plate)')"
+          },
+          "rarity": {
+            "type": "string",
+            "enum": ["common", "uncommon", "rare", "very rare", "legendary", "artifact"],
+            "description": "Item rarity according to D&D 5e"
+          },
+          "requiresAttunement": {
+            "type": "boolean",
+            "description": "Whether the item requires attunement"
+          },
+          "attunementRequirement": {
+            "type": "string",
+            "description": "Specific attunement requirement (e.g., 'by a spellcaster', 'by a cleric') or null if none"
+          },
+          "description": {
+            "type": "string",
+            "description": "2-3 sentences of rich physical description and craftsmanship details"
+          },
+          "history": {
+            "type": "string",
+            "description": "1-2 sentences about previous owner or item's origin"
+          },
+          "properties": {
+            "type": "string",
+            "description": "Mechanical benefits in D&D terms - specific with dice, DCs, save types, damage types, etc."
+          },
+          "complication": {
+            "type": "string",
+            "description": "The quirk/drawback that makes it unique"
+          },
+          "priceGp": {
+            "type": "integer",
+            "description": "Price in gold pieces (will be filled by pricing system)"
+          }
+        },
+        "required": ["name", "itemType", "rarity", "requiresAttunement", "description", "properties", "complication"]
+      }
+    }
+  },
+  "required": ["items"]
+}

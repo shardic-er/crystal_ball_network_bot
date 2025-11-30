@@ -11,7 +11,8 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessageReactions
   ]
 });
 
@@ -398,7 +399,7 @@ async function sendToClaudeAPI(messages, threadId, accountBalance) {
 
     await trackCost(threadId, response.usage);
 
-    return response.content[0].text;
+    return { text: response.content[0].text, shouldFilterByBudget: false };
   } else if (config.provider === 'openai') {
     const systemPrompt = getSystemPrompt(accountBalance);
     const systemMessage = systemPrompt.map(p => p.text).join('\n\n');
@@ -423,7 +424,8 @@ async function sendToClaudeAPI(messages, threadId, accountBalance) {
 
     await trackCost(threadId, usage);
 
-    return response.choices[0].message.content;
+    // OpenAI doesn't support tool use in the same way, so always return false for budget filtering
+    return { text: response.choices[0].message.content, shouldFilterByBudget: false };
   }
 
   throw new Error(`Unknown provider: ${config.provider}`);
@@ -733,6 +735,78 @@ async function bootstrapServer(guild, statusMessage) {
     }
   }
 
+  await updateStatus('Initializing inventory threads for existing members...');
+
+  // Initialize inventory threads for all existing members
+  const members = await guild.members.fetch();
+  const cbnChannel = guild.channels.cache.find(
+    c => c.name === GAME_CHANNEL_NAME && c.type === ChannelType.GuildText
+  );
+
+  if (cbnChannel) {
+    let created = 0;
+    let skipped = 0;
+
+    for (const [, member] of members) {
+      // Skip bots
+      if (member.user.bot) continue;
+
+      // Create or get player first
+      const player = Player.getOrCreate(member.id, member.user.username, 500);
+
+      // Check if already has inventory thread in database
+      const existing = InventoryThread.getByPlayerId(player.player_id);
+
+      if (existing) {
+        // Verify the Discord thread still exists
+        try {
+          const discordThread = await guild.channels.fetch(existing.discord_thread_id);
+          console.log(`[BOOTSTRAP] Skipping ${member.user.username} - valid thread exists`);
+          skipped++;
+          continue;
+        } catch (error) {
+          // Thread doesn't exist, clean up stale database entry
+          console.log(`[BOOTSTRAP] Found stale database entry for ${member.user.username}, will recreate`);
+          const db = require('./database/db');
+          db.prepare('DELETE FROM inventory_threads WHERE thread_id = ?').run(existing.thread_id);
+        }
+      }
+
+      // Create inventory thread
+      const threadName = `inventory-${member.user.username}`;
+      const thread = await cbnChannel.threads.create({
+        name: threadName,
+        autoArchiveDuration: null,
+        type: ChannelType.PrivateThread,
+        reason: `Creating inventory thread for ${member.user.username}`
+      });
+
+      await thread.members.add(member.id);
+
+      const headerTemplate = await fs.readFile(
+        path.join(__dirname, 'templates', 'inventory_header.md'),
+        'utf-8'
+      );
+
+      const headerContent = headerTemplate
+        .replace('{balance}', player.account_balance_gp)
+        .replace('{count}', 0)
+        .replace('{value}', 0);
+
+      const headerMessage = await thread.send(headerContent);
+
+      // Lock the thread to make it read-only
+      await thread.setLocked(true);
+
+      InventoryThread.create(player.player_id, thread.id, headerMessage.id);
+
+      created++;
+      console.log(`[BOOTSTRAP] Created inventory for ${member.user.username}`);
+    }
+
+    console.log(`[BOOTSTRAP] Inventory initialization: Created ${created}, skipped ${skipped}`);
+  }
+
   await updateStatus('Bootstrap complete! The Crystal Ball Network is ready.');
   } catch (error) {
     console.error('Bootstrap error:', error);
@@ -927,23 +1001,22 @@ client.on('guildMemberAdd', async (member) => {
     const player = Player.getOrCreate(member.id, member.user.username, 500);
     console.log(`[MEMBER JOIN] Created/found player: ${player.username} (${player.player_id}) with ${player.account_balance_gp}gp`);
 
-    // Find the Crystal Ball Network category
-    const category = member.guild.channels.cache.find(
-      c => c.type === ChannelType.GuildCategory && c.name === 'Crystal Ball Network'
+    // Find the crystal-ball-network channel
+    const cbnChannel = member.guild.channels.cache.find(
+      c => c.name === GAME_CHANNEL_NAME && c.type === ChannelType.GuildText
     );
 
-    if (!category) {
-      console.warn('[MEMBER JOIN] Crystal Ball Network category not found. Run !bootstrap first.');
+    if (!cbnChannel) {
+      console.warn('[MEMBER JOIN] crystal-ball-network channel not found. Run !bootstrap first.');
       return;
     }
 
-    // Create persistent inventory thread
+    // Create persistent inventory thread from the channel
     const threadName = `inventory-${member.user.username}`;
-    const thread = await member.guild.channels.create({
+    const thread = await cbnChannel.threads.create({
       name: threadName,
-      type: ChannelType.PrivateThread,
-      parent: category.id,
       autoArchiveDuration: null, // Never auto-archive
+      type: ChannelType.PrivateThread,
       reason: `Creating inventory thread for ${member.user.username}`
     });
 
@@ -964,6 +1037,9 @@ client.on('guildMemberAdd', async (member) => {
 
     // Send header message
     const headerMessage = await thread.send(headerContent);
+
+    // Lock the thread to make it read-only
+    await thread.setLocked(true);
 
     // Store inventory thread in database
     InventoryThread.create(player.player_id, thread.id, headerMessage.id);
@@ -1060,6 +1136,9 @@ client.on('messageReactionAdd', async (reaction, user) => {
         return;
       }
 
+      // Unlock inventory thread to post item
+      await inventoryChannel.setLocked(false);
+
       // Format item for inventory (same format, but mark as purchased)
       const inventoryItemMarkdown = formatItemAsMarkdown(item, 0, price)
         .replace('**Price:', '*Purchased for:');
@@ -1090,6 +1169,9 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
       await headerMessage.edit(updatedHeader);
       console.log(`[PURCHASE] Updated inventory header`);
+
+      // Re-lock inventory thread
+      await inventoryChannel.setLocked(true);
 
       // Delete item from search thread
       await message.delete();
@@ -1150,79 +1232,6 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // Init command - create inventory for existing members (owner only)
-  if (message.content === '!init') {
-    if (message.author.id !== message.guild.ownerId) {
-      await message.reply('Only the server owner can use this command.');
-      return;
-    }
-
-    try {
-      const statusMsg = await message.reply('Initializing inventory threads for existing members...');
-
-      const members = await message.guild.members.fetch();
-      const category = message.guild.channels.cache.find(
-        c => c.type === ChannelType.GuildCategory && c.name === 'Crystal Ball Network'
-      );
-
-      if (!category) {
-        await statusMsg.edit('Error: Crystal Ball Network category not found. Run !bootstrap first.');
-        return;
-      }
-
-      let created = 0;
-      let skipped = 0;
-
-      for (const [, member] of members) {
-        // Skip bots
-        if (member.user.bot) continue;
-
-        // Check if already has inventory thread
-        const existing = InventoryThread.getByPlayerId(member.id);
-        if (existing) {
-          skipped++;
-          continue;
-        }
-
-        // Create player and inventory thread
-        const player = Player.getOrCreate(member.id, member.user.username, 500);
-
-        const threadName = `inventory-${member.user.username}`;
-        const thread = await message.guild.channels.create({
-          name: threadName,
-          type: ChannelType.PrivateThread,
-          parent: category.id,
-          autoArchiveDuration: null,
-          reason: `Creating inventory thread for existing member ${member.user.username}`
-        });
-
-        await thread.members.add(member.id);
-
-        const headerTemplate = await fs.readFile(
-          path.join(__dirname, 'templates', 'inventory_header.md'),
-          'utf-8'
-        );
-
-        const headerContent = headerTemplate
-          .replace('{balance}', player.account_balance_gp)
-          .replace('{count}', 0)
-          .replace('{value}', 0);
-
-        const headerMessage = await thread.send(headerContent);
-        InventoryThread.create(player.player_id, thread.id, headerMessage.id);
-
-        created++;
-        console.log(`[INIT] Created inventory for ${member.user.username}`);
-      }
-
-      await statusMsg.edit(`Initialization complete! Created ${created} inventory threads, skipped ${skipped} existing.`);
-    } catch (error) {
-      console.error('[INIT] Error:', error);
-      await message.reply(`Error during initialization: ${error.message}`);
-    }
-    return;
-  }
-
   // Handle crystal-ball-network channel
   if (message.channel.name === GAME_CHANNEL_NAME && message.channel.type === ChannelType.GuildText) {
     const isCommand = ALLOWED_COMMANDS.some(cmd => message.content.startsWith(cmd));
@@ -1252,7 +1261,7 @@ client.on('messageCreate', async (message) => {
         const threadName = `search-${message.author.username}-${Date.now()}`;
         const thread = await message.channel.threads.create({
           name: threadName,
-          autoArchiveDuration: 1440, // 24 hours
+          autoArchiveDuration: 60, // 1 hour (shortest Discord allows)
           type: ChannelType.PrivateThread,
           reason: `Creating search session for ${message.author.username}`
         });
@@ -1260,30 +1269,45 @@ client.on('messageCreate', async (message) => {
         // Add member to thread
         await thread.members.add(message.author.id);
 
-        // Load search greeting template
-        const greetingTemplate = await fs.readFile(
+        // Load and send static diegetic intro (fast, no AI call)
+        const staticIntro = await fs.readFile(
           path.join(__dirname, 'templates', 'search_greeting.md'),
           'utf-8'
         );
+        await thread.send(staticIntro);
 
-        // Format greeting with player balance
-        const greeting = greetingTemplate.replace('{balance}', player.account_balance_gp);
-
-        // Send greeting
-        await thread.send(greeting);
-
-        // Create session in cbn_sessions
+        // Create session for AI greeting generation
         cbnSessions[thread.id] = {
           playerId: message.author.id,
           playerName: message.author.username,
           startedAt: new Date().toISOString(),
           accountBalance: player.account_balance_gp,
-          messages: [
-            { role: 'assistant', content: greeting }
-          ],
+          messages: [],
           modelMode: MODEL_MODE,
           sessionType: 'search'
         };
+
+        // Generate balance-aware greeting using AI
+        await thread.sendTyping();
+
+        const greetingPrompt = `Generate a short greeting for a customer who just opened the Crystal Ball Network. Their current balance is ${player.account_balance_gp} gp. Use the appropriate tone based on their balance tier. Keep it brief (2-3 sentences). End by asking what they're looking for. Respond with plain text, not JSON.`;
+
+        cbnSessions[thread.id].messages.push({
+          role: 'user',
+          content: greetingPrompt
+        });
+
+        const aiResponse = await sendToClaudeAPI(cbnSessions[thread.id].messages, thread.id, player.account_balance_gp);
+        const aiGreeting = aiResponse.text;
+
+        // Send AI-generated greeting
+        await thread.send(aiGreeting);
+
+        // Update session with the greeting exchange
+        cbnSessions[thread.id].messages.push({
+          role: 'assistant',
+          content: aiGreeting
+        });
 
         await saveSessions();
 
@@ -1468,8 +1492,9 @@ client.on('messageCreate', async (message) => {
   await message.channel.sendTyping();
 
   try {
-    // Send to Claude/OpenAI for item generation (returns JSON or plain text)
-    const rawResponse = await sendToClaudeAPI(session.messages, threadId, session.accountBalance);
+    // Send to Claude/OpenAI for item generation
+    const apiResponse = await sendToClaudeAPI(session.messages, threadId, session.accountBalance);
+    const rawResponse = apiResponse.text;
 
     // Parse and format response
     const parsed = parseAndFormatResponse(rawResponse, null);
@@ -1481,18 +1506,29 @@ client.on('messageCreate', async (message) => {
       // Get prices for items
       const prices = await addPricingToItems(parsed.items, threadId);
 
-      // Filter out items that are too expensive for the player
-      const affordableItems = [];
-      const affordablePrices = [];
+      // Check if Claude requested budget filtering via JSON field
+      const shouldFilterByBudget = parsed.rawJson?.filterByBudget === true;
 
-      for (let i = 0; i < parsed.items.length; i++) {
-        if (prices[i] <= session.accountBalance) {
-          affordableItems.push(parsed.items[i]);
-          affordablePrices.push(prices[i]);
+      // Conditionally filter based on whether Claude requested it
+      let affordableItems = parsed.items;
+      let affordablePrices = prices;
+
+      if (shouldFilterByBudget) {
+        console.log('[FILTER] Budget filtering requested by Claude (filterByBudget: true)');
+        affordableItems = [];
+        affordablePrices = [];
+
+        for (let i = 0; i < parsed.items.length; i++) {
+          if (prices[i] <= session.accountBalance) {
+            affordableItems.push(parsed.items[i]);
+            affordablePrices.push(prices[i]);
+          }
         }
-      }
 
-      console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${session.accountBalance}gp)`);
+        console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${session.accountBalance}gp)`);
+      } else {
+        console.log('[FILTER] No budget filtering - showing all items');
+      }
 
       // Check if any items remain after filtering
       if (affordableItems.length === 0) {

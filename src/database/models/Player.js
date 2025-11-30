@@ -109,10 +109,9 @@ class Player {
     db.prepare(`
       UPDATE players
       SET account_balance_gp = account_balance_gp - ?,
-          total_spent_gp = total_spent_gp + ?,
           last_active_at = CURRENT_TIMESTAMP
       WHERE player_id = ?
-    `).run(amount, amount, playerId);
+    `).run(amount, playerId);
 
     return Player.getById(playerId);
   }

@@ -63,10 +63,7 @@ CREATE TABLE IF NOT EXISTS items (
   properties TEXT NOT NULL,
   complication TEXT NOT NULL,
   base_price_gp INTEGER NOT NULL,
-  generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  generated_in_session_id TEXT,
-
-  FOREIGN KEY (generated_in_session_id) REFERENCES shopping_sessions(session_id) ON DELETE SET NULL
+  generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_rarity ON items(rarity);

@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, AttachmentBuilder, Partials } = require('discord.js');
 const Anthropic = require('@anthropic-ai/sdk');
 const OpenAI = require('openai');
 const fs = require('fs').promises;
@@ -13,6 +13,11 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions
+  ],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.Reaction
   ]
 });
 
@@ -30,6 +35,7 @@ const CBN_PROMPT_PATH = path.join(__dirname, 'cbn_system_prompt.md');
 const CBN_PRICING_PROMPT_PATH = path.join(__dirname, 'cbn_pricing_prompt.md');
 const TEMPLATES_DIR = path.join(__dirname, 'discord_channel_templates');
 const GAME_CHANNEL_NAME = 'crystal-ball-network';
+const ACCOUNTS_CHANNEL_NAME = 'accounts';
 const ALLOWED_COMMANDS = ['!start', '!bootstrap', '!share', '!cost', '!fast', '!fancy', '!cheap', '!search'];
 
 // Model configurations
@@ -697,7 +703,7 @@ async function bootstrapServer(guild, statusMessage) {
   }
 
   const existingChannels = guild.channels.cache.filter(
-    c => c.parentId === category.id && c.type === ChannelType.GuildText
+    c => c.parentId === category.id && c.type === ChannelType.GuildText && c.name !== ACCOUNTS_CHANNEL_NAME
   );
 
   for (const [, channel] of existingChannels) {
@@ -710,6 +716,17 @@ async function bootstrapServer(guild, statusMessage) {
   }
 
   for (const config of channelConfigs) {
+    // Skip accounts channel if it already exists (it's persistent)
+    if (config.name === ACCOUNTS_CHANNEL_NAME) {
+      const existingAccounts = guild.channels.cache.find(
+        c => c.name === ACCOUNTS_CHANNEL_NAME && c.type === ChannelType.GuildText
+      );
+      if (existingAccounts) {
+        console.log('[BOOTSTRAP] Skipping accounts channel - already exists');
+        continue;
+      }
+    }
+
     await updateStatus(`Creating channel: #${config.name}...`);
 
     const channel = await guild.channels.create({
@@ -739,11 +756,11 @@ async function bootstrapServer(guild, statusMessage) {
 
   // Initialize inventory threads for all existing members
   const members = await guild.members.fetch();
-  const cbnChannel = guild.channels.cache.find(
-    c => c.name === GAME_CHANNEL_NAME && c.type === ChannelType.GuildText
+  const accountsChannel = guild.channels.cache.find(
+    c => c.name === ACCOUNTS_CHANNEL_NAME && c.type === ChannelType.GuildText
   );
 
-  if (cbnChannel) {
+  if (accountsChannel) {
     let created = 0;
     let skipped = 0;
 
@@ -754,27 +771,40 @@ async function bootstrapServer(guild, statusMessage) {
       // Create or get player first
       const player = Player.getOrCreate(member.id, member.user.username, 500);
 
-      // Check if already has inventory thread in database
+      // Check if inventory thread exists in database
       const existing = InventoryThread.getByPlayerId(player.player_id);
 
+      // Delete existing Discord thread if it exists (we'll recreate it fresh)
       if (existing) {
-        // Verify the Discord thread still exists
         try {
-          const discordThread = await guild.channels.fetch(existing.discord_thread_id);
-          console.log(`[BOOTSTRAP] Skipping ${member.user.username} - valid thread exists`);
-          skipped++;
-          continue;
+          const oldThread = await guild.channels.fetch(existing.discord_thread_id);
+          await oldThread.delete();
+          console.log(`[BOOTSTRAP] Deleted old inventory thread for ${member.user.username}`);
         } catch (error) {
-          // Thread doesn't exist, clean up stale database entry
-          console.log(`[BOOTSTRAP] Found stale database entry for ${member.user.username}, will recreate`);
-          const db = require('./database/db');
-          db.prepare('DELETE FROM inventory_threads WHERE thread_id = ?').run(existing.thread_id);
+          console.log(`[BOOTSTRAP] Old thread already gone for ${member.user.username}`);
+        }
+
+        // Clean up database entry
+        const db = require('./database/db');
+        db.prepare('DELETE FROM inventory_threads WHERE thread_id = ?').run(existing.thread_id);
+      }
+
+      // Also check for any stray threads with matching name
+      const existingThreads = accountsChannel.threads.cache.filter(
+        t => t.name === `inventory-${member.user.username}`
+      );
+      for (const [, strayThread] of existingThreads) {
+        try {
+          await strayThread.delete();
+          console.log(`[BOOTSTRAP] Deleted stray thread for ${member.user.username}`);
+        } catch (err) {
+          console.log(`[BOOTSTRAP] Could not delete stray thread: ${err.message}`);
         }
       }
 
-      // Create inventory thread
+      // Create fresh inventory thread
       const threadName = `inventory-${member.user.username}`;
-      const thread = await cbnChannel.threads.create({
+      const thread = await accountsChannel.threads.create({
         name: threadName,
         autoArchiveDuration: null,
         type: ChannelType.PrivateThread,
@@ -794,6 +824,44 @@ async function bootstrapServer(guild, statusMessage) {
         .replace('{value}', 0);
 
       const headerMessage = await thread.send(headerContent);
+
+      // Populate with existing items from database
+      const existingItems = Item.getPlayerInventory(player.player_id, true, false);
+
+      if (existingItems.length > 0) {
+        console.log(`[BOOTSTRAP] Populating ${existingItems.length} existing items for ${member.user.username}`);
+
+        for (const dbItem of existingItems) {
+          const itemMarkdown = formatItemAsMarkdown(
+            {
+              name: dbItem.name,
+              itemType: dbItem.item_type,
+              rarity: dbItem.rarity,
+              requiresAttunement: Boolean(dbItem.requires_attunement),
+              attunementRequirement: dbItem.attunement_requirement,
+              description: dbItem.description,
+              history: dbItem.history,
+              properties: dbItem.properties,
+              complication: dbItem.complication
+            },
+            0,
+            dbItem.purchase_price_gp
+          ).replace('**Price:', '*Purchased for:');
+
+          const itemMessage = await thread.send(itemMarkdown);
+          await itemMessage.react('💰');
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+
+        // Update header with correct counts
+        const totalValue = existingItems.reduce((sum, i) => sum + (i.purchase_price_gp || 0), 0);
+        const updatedHeader = headerTemplate
+          .replace('{balance}', player.account_balance_gp)
+          .replace('{count}', existingItems.length)
+          .replace('{value}', totalValue);
+
+        await headerMessage.edit(updatedHeader);
+      }
 
       // Lock the thread to make it read-only
       await thread.setLocked(true);
@@ -1001,19 +1069,19 @@ client.on('guildMemberAdd', async (member) => {
     const player = Player.getOrCreate(member.id, member.user.username, 500);
     console.log(`[MEMBER JOIN] Created/found player: ${player.username} (${player.player_id}) with ${player.account_balance_gp}gp`);
 
-    // Find the crystal-ball-network channel
-    const cbnChannel = member.guild.channels.cache.find(
-      c => c.name === GAME_CHANNEL_NAME && c.type === ChannelType.GuildText
+    // Find the accounts channel
+    const accountsChannel = member.guild.channels.cache.find(
+      c => c.name === ACCOUNTS_CHANNEL_NAME && c.type === ChannelType.GuildText
     );
 
-    if (!cbnChannel) {
-      console.warn('[MEMBER JOIN] crystal-ball-network channel not found. Run !bootstrap first.');
+    if (!accountsChannel) {
+      console.warn('[MEMBER JOIN] accounts channel not found. Run !bootstrap first.');
       return;
     }
 
-    // Create persistent inventory thread from the channel
+    // Create persistent inventory thread from the accounts channel
     const threadName = `inventory-${member.user.username}`;
-    const thread = await cbnChannel.threads.create({
+    const thread = await accountsChannel.threads.create({
       name: threadName,
       autoArchiveDuration: null, // Never auto-archive
       type: ChannelType.PrivateThread,
@@ -1066,20 +1134,28 @@ client.on('messageReactionAdd', async (reaction, user) => {
     }
   }
 
-  const message = reaction.message;
+  // Fetch partial message if needed
+  let message = reaction.message;
+  if (message.partial) {
+    try {
+      message = await message.fetch();
+    } catch (error) {
+      console.error('Error fetching message:', error);
+      return;
+    }
+  }
+
   const emoji = reaction.emoji.name;
 
   // Handle shopping cart emoji (purchase)
   if (emoji === '🛒') {
     try {
-      console.log(`[PURCHASE] User ${user.username} clicked cart on message ${message.id}`);
-
       // Find the session for this thread
       const threadId = message.channel.id;
       const session = cbnSessions[threadId];
 
       if (!session) {
-        console.log('[PURCHASE] No session found for this thread');
+        await message.channel.send('This search session is no longer active. Please start a new search by typing your query in #crystal-ball-network.');
         return;
       }
 
@@ -1090,14 +1166,11 @@ client.on('messageReactionAdd', async (reaction, user) => {
         .find(im => im.messageId === message.id);
 
       if (!itemData) {
-        console.log('[PURCHASE] No item found for this message');
         return;
       }
 
       const item = itemData.item;
       const price = item.priceGp;
-
-      console.log(`[PURCHASE] Found item: ${item.name} for ${price}gp`);
 
       // Get player from database
       const player = Player.getByDiscordId(user.id);
@@ -1108,11 +1181,22 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
       // Check if player has enough funds
       if (player.account_balance_gp < price) {
+        // Remove the cart reaction to acknowledge the attempt
+        await reaction.users.remove(user.id);
+
         await message.channel.send(
           `Insufficient funds! **${item.name}** costs **${price} gp** but you only have **${player.account_balance_gp} gp**.`
         );
         return;
       }
+
+      // Save item to database first
+      const dbItem = Item.create(item, price);
+      console.log(`[PURCHASE] Created item in database: ${dbItem.item_id}`);
+
+      // Add item to player inventory
+      Item.addToInventory(dbItem.item_id, player.player_id, price);
+      console.log(`[PURCHASE] Added item to player inventory in database`);
 
       // Deduct gold
       Player.deductGold(player.player_id, price);
@@ -1176,10 +1260,8 @@ client.on('messageReactionAdd', async (reaction, user) => {
       // Delete item from search thread
       await message.delete();
 
-      // Send confirmation
-      await message.channel.send(
-        `Purchase complete! **${item.name}** for **${price} gp**\n\nNew balance: **${updatedPlayer.account_balance_gp} gp**\n\nCheck your inventory thread to see your new item!`
-      );
+      // Send simplified confirmation
+      await message.channel.send(`Bought: **${item.name}** for **${price} gp**`);
 
       console.log(`[PURCHASE] Purchase complete for ${user.username}`);
 
@@ -1234,110 +1316,221 @@ client.on('messageCreate', async (message) => {
 
   // Handle crystal-ball-network channel
   if (message.channel.name === GAME_CHANNEL_NAME && message.channel.type === ChannelType.GuildText) {
-    const isCommand = ALLOWED_COMMANDS.some(cmd => message.content.startsWith(cmd));
+    try {
+      // Get or create player
+      const player = Player.getOrCreate(message.author.id, message.author.username, 500);
+      console.log(`[SEARCH] Player ${player.username} starting search (balance: ${player.account_balance_gp}gp)`);
 
-    // Auto-delete non-command messages
-    if (!isCommand) {
-      try {
-        await message.delete();
-        const warning = await message.channel.send(
-          `*The crystal ripples with confusion. Please use a command: \`!search\`*`
-        );
-        setTimeout(() => warning.delete().catch(() => {}), 5000);
-      } catch (error) {
-        console.error('Error moderating message:', error);
+      // Store the user's search query
+      const userQuery = message.content;
+
+      // Delete the user's message immediately
+      await message.delete();
+
+      // Send immediate confirmation in main channel (will be deleted after thread is created)
+      const confirmation = await message.channel.send(
+        `Opening search portal for ${message.author}...`
+      );
+
+      // Create ephemeral search thread with truncated query
+      // Truncate query to fit Discord's 100 character limit for thread names
+      const maxQueryLength = 100 - message.author.username.length - 8; // "search-" (7) + "-" (1) = 8
+      const truncatedQuery = userQuery.length > maxQueryLength
+        ? userQuery.substring(0, maxQueryLength - 3) + '...'
+        : userQuery;
+      const threadName = `search-${message.author.username}-${truncatedQuery}`;
+
+      const thread = await message.channel.threads.create({
+        name: threadName,
+        autoArchiveDuration: 60, // 1 hour (shortest Discord allows)
+        type: ChannelType.PrivateThread,
+        reason: `Creating search session for ${message.author.username}`
+      });
+
+      // Add member to thread
+      await thread.members.add(message.author.id);
+
+      // Create session with user's query
+      cbnSessions[thread.id] = {
+        playerId: message.author.id,
+        playerName: message.author.username,
+        startedAt: new Date().toISOString(),
+        accountBalance: player.account_balance_gp,
+        messages: [],
+        modelMode: MODEL_MODE,
+        sessionType: 'search'
+      };
+
+      // Send immediate acknowledgment with balance-appropriate tone
+      let searchingMessage = '';
+      if (player.account_balance_gp >= 10000) {
+        searchingMessage = `*The crystal ball flickers to life with brilliant, welcoming radiance*\n\nMOST ESTEEMED PATRON! Your account balance is **${player.account_balance_gp} gp** - truly magnificent! It is my HONOR to search for "${userQuery}" immediately!\n\n*The network hums with eager energy as I compile the finest selections for you...*`;
+      } else if (player.account_balance_gp >= 1000) {
+        searchingMessage = `*The crystal ball flickers to life with a warm, professional glow*\n\nWelcome back, valued customer! Your account balance is **${player.account_balance_gp} gp**. Searching for "${userQuery}"...\n\n*The network processes your request...*`;
+      } else if (player.account_balance_gp >= 100) {
+        searchingMessage = `*The crystal ball flickers to life with a businesslike shimmer*\n\nYour account balance is **${player.account_balance_gp} gp**. Searching for "${userQuery}"... let's see what we have in your price range.\n\n*The network searches...*`;
+      } else if (player.account_balance_gp >= 10) {
+        searchingMessage = `*The crystal ball flickers to life with a distinctly unenthusiastic shimmer*\n\n*Sigh.* Another window shopper. Your account balance is **${player.account_balance_gp} gp**. You want "${userQuery}"? Let me see what scraps I can find...\n\n*The network searches with minimal enthusiasm...*`;
+      } else {
+        searchingMessage = `*The crystal ball flickers to life with a distinctly unenthusiastic shimmer*\n\nOh. Another window shopper. Your account balance is **${player.account_balance_gp} gp** - that's right, ${player.account_balance_gp === 0 ? 'ZERO. Zilch. Nada. Nothing.' : 'practically nothing.'}  Why are you even HERE?\n\n*Heavy, theatrical sigh*\n\nBut FINE, I suppose I'll show you "${userQuery}" since you asked. Not that you can afford ANY of them. Maybe this will motivate you to go do some ACTUAL adventuring and come back when you have REAL money.\n\n*The network searches, grudgingly...*`;
       }
-      return;
-    }
 
-    // Handle !search command
-    if (message.content === '!search') {
-      try {
-        // Get or create player
-        const player = Player.getOrCreate(message.author.id, message.author.username, 500);
-        console.log(`[SEARCH] Player ${player.username} starting search (balance: ${player.account_balance_gp}gp)`);
+      await thread.send(searchingMessage);
 
-        // Create ephemeral search thread
-        const threadName = `search-${message.author.username}-${Date.now()}`;
-        const thread = await message.channel.threads.create({
-          name: threadName,
-          autoArchiveDuration: 60, // 1 hour (shortest Discord allows)
-          type: ChannelType.PrivateThread,
-          reason: `Creating search session for ${message.author.username}`
-        });
+      // Add the searching message to history so AI doesn't repeat it
+      cbnSessions[thread.id].messages.push({
+        role: 'assistant',
+        content: searchingMessage
+      });
 
-        // Add member to thread
-        await thread.members.add(message.author.id);
+      // Now send the user's actual search query
+      await thread.sendTyping();
 
-        // Load and send static diegetic intro (fast, no AI call)
-        const staticIntro = await fs.readFile(
-          path.join(__dirname, 'templates', 'search_greeting.md'),
-          'utf-8'
-        );
-        await thread.send(staticIntro);
+      const userPrompt = `"${userQuery}"`;
 
-        // Create session for AI greeting generation
-        cbnSessions[thread.id] = {
-          playerId: message.author.id,
-          playerName: message.author.username,
-          startedAt: new Date().toISOString(),
-          accountBalance: player.account_balance_gp,
-          messages: [],
-          modelMode: MODEL_MODE,
-          sessionType: 'search'
-        };
+      cbnSessions[thread.id].messages.push({
+        role: 'user',
+        content: userPrompt
+      });
 
-        // Generate balance-aware greeting using AI
-        await thread.sendTyping();
+      const apiResponse = await sendToClaudeAPI(cbnSessions[thread.id].messages, thread.id, player.account_balance_gp);
+      const rawResponse = apiResponse.text;
 
-        const greetingPrompt = `Generate a short greeting for a customer who just opened the Crystal Ball Network. Their current balance is ${player.account_balance_gp} gp. Use the appropriate tone based on their balance tier. Keep it brief (2-3 sentences). End by asking what they're looking for. Respond with plain text, not JSON.`;
+      // Parse and format response
+      const parsed = parseAndFormatResponse(rawResponse, null);
 
-        cbnSessions[thread.id].messages.push({
-          role: 'user',
-          content: greetingPrompt
-        });
+      let finalResponse = rawResponse;
+      let itemsData = null;
 
-        const aiResponse = await sendToClaudeAPI(cbnSessions[thread.id].messages, thread.id, player.account_balance_gp);
-        const aiGreeting = aiResponse.text;
+      if (parsed.type === 'items') {
+        // Get prices for items
+        const prices = await addPricingToItems(parsed.items, thread.id);
 
-        // Send AI-generated greeting
-        await thread.send(aiGreeting);
+        // Check if Claude requested budget filtering via JSON field
+        const shouldFilterByBudget = parsed.rawJson?.filterByBudget === true;
 
-        // Update session with the greeting exchange
-        cbnSessions[thread.id].messages.push({
-          role: 'assistant',
-          content: aiGreeting
-        });
+        // Conditionally filter based on whether Claude requested it
+        let affordableItems = parsed.items;
+        let affordablePrices = prices;
 
-        await saveSessions();
+        if (shouldFilterByBudget) {
+          console.log('[FILTER] Budget filtering requested by Claude (filterByBudget: true)');
+          affordableItems = [];
+          affordablePrices = [];
 
-        // Delete user's !search command
-        try {
-          await message.delete();
-        } catch (error) {
-          console.warn('Could not delete !search command:', error.message);
+          for (let i = 0; i < parsed.items.length; i++) {
+            if (prices[i] <= player.account_balance_gp) {
+              affordableItems.push(parsed.items[i]);
+              affordablePrices.push(prices[i]);
+            }
+          }
+
+          console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${player.account_balance_gp}gp)`);
+        } else {
+          console.log('[FILTER] No budget filtering - showing all items');
         }
 
-        // Send confirmation and auto-delete
-        const confirmation = await message.channel.send(
-          `Opening search portal for ${message.author}...`
-        );
-        setTimeout(async () => {
-          try {
-            await confirmation.delete();
-          } catch (error) {
-            console.warn('Could not delete confirmation:', error.message);
+        // Check if any items remain after filtering
+        if (affordableItems.length === 0) {
+          await thread.send(
+            `*The Curator rubs their temples and sighs.*\n\n` +
+            `"I'm afraid ALL the items I was about to show you exceed your current balance of **${player.account_balance_gp} gp**. ` +
+            `Perhaps try a more... modest search query? Or consider items of common or uncommon rarity within your price range."`
+          );
+
+          // Store a summary for conversation history
+          finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the player's ${player.account_balance_gp}gp budget.`;
+        } else {
+          // Send intro message if present
+          if (parsed.rawJson?.message) {
+            await thread.send(parsed.rawJson.message);
+            await new Promise(resolve => setTimeout(resolve, 300));
           }
-        }, 3000);
 
-        console.log(`[SEARCH] Created search thread for ${message.author.username}: ${threadName}`);
+          // Notify if some items were filtered
+          if (affordableItems.length < parsed.items.length) {
+            const filtered = parsed.items.length - affordableItems.length;
+            await thread.send(
+              `*The Curator discretely sets aside ${filtered} item${filtered > 1 ? 's' : ''} that exceed${filtered === 1 ? 's' : ''} your current budget...*`
+            );
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
 
-      } catch (error) {
-        console.error('[SEARCH] Error creating search thread:', error);
-        await message.reply('Sorry, there was an error starting your search session. Please try again.');
+          // Send each affordable item as a separate message with shopping cart reaction
+          const itemMessages = [];
+          for (let i = 0; i < affordableItems.length; i++) {
+            const item = affordableItems[i];
+            const price = affordablePrices[i];
+
+            // Format single item as markdown
+            const itemMarkdown = formatItemAsMarkdown(item, i, price);
+
+            // Send item message
+            const itemMessage = await thread.send(itemMarkdown);
+
+            // Add shopping cart reaction
+            await itemMessage.react('🛒');
+
+            // Store message ID for purchase tracking
+            itemMessages.push({
+              messageId: itemMessage.id,
+              item: { ...item, priceGp: price }
+            });
+
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
+
+          // Store items data for session
+          itemsData = {
+            rawJson: parsed.rawJson,
+            items: affordableItems.map((item, index) => ({
+              ...item,
+              priceGp: affordablePrices[index]
+            })),
+            itemMessages: itemMessages
+          };
+
+          // Create a summary for conversation history
+          finalResponse = parsed.rawJson?.message || `Generated ${affordableItems.length} affordable items (${parsed.items.length - affordableItems.length} filtered)`;
+        }
+
+      } else {
+        // Plain text response (account queries, etc.)
+        finalResponse = parsed.content;
+
+        // Send plain text response
+        const chunks = splitMessage(finalResponse);
+        for (const chunk of chunks) {
+          await thread.send(chunk);
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
-      return;
+
+      // Store assistant response
+      cbnSessions[thread.id].messages.push({
+        role: 'assistant',
+        content: finalResponse,
+        itemsData: itemsData
+      });
+
+      await saveSessions();
+
+      // Delete the "opening portal" confirmation message now that thread is ready
+      setTimeout(async () => {
+        try {
+          await confirmation.delete();
+        } catch (error) {
+          console.warn('Could not delete confirmation:', error.message);
+        }
+      }, 3000);
+
+      console.log(`[SEARCH] Created search thread for ${message.author.username}: ${threadName}`);
+
+    } catch (error) {
+      console.error('[SEARCH] Error creating search thread:', error);
+      await message.channel.send('Sorry, there was an error starting your search session. Please try again.');
     }
+    return;
   }
 
   // Handle bot-commands channel moderation

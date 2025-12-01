@@ -5,20 +5,31 @@ class Item {
    * Create a new item in the catalog
    * @param {Object} itemData - Item properties from JSON
    * @param {number} priceGp - Final price in gold pieces
-   * @param {string} sessionId - Shopping session where it was generated
-   * @param {number} playerId - Player it was generated for
    * @returns {Object} Created item
    */
-  static create(itemData, priceGp, sessionId, playerId) {
+  static create(itemData, priceGp) {
+    // Validate that itemData is an object
+    if (typeof itemData !== 'object' || itemData === null) {
+      console.error('[DB ERROR] itemData is not an object:', itemData);
+      throw new Error('itemData must be an object');
+    }
+
+    // Log the data being inserted for debugging
+    console.log('[DB] Creating item:', {
+      name: itemData.name,
+      itemType: itemData.itemType,
+      rarity: itemData.rarity,
+      priceGp: priceGp
+    });
+
     const insert = db.prepare(`
       INSERT INTO items (
         name, item_type, rarity, requires_attunement, attunement_requirement,
-        description, history, properties, complication, base_price_gp,
-        generated_in_session_id, generated_for_player_id, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        description, history, properties, complication, base_price_gp
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const result = insert.run(
+    const params = [
       itemData.name,
       itemData.itemType,
       itemData.rarity,
@@ -28,11 +39,20 @@ class Item {
       itemData.history,
       itemData.properties,
       itemData.complication,
-      priceGp,
-      sessionId,
-      playerId,
-      JSON.stringify({ ...itemData, priceGp })
-    );
+      priceGp
+    ];
+
+    // Validate all params are bindable types
+    for (let i = 0; i < params.length; i++) {
+      const param = params[i];
+      const type = typeof param;
+      if (param !== null && type !== 'string' && type !== 'number' && type !== 'bigint' && !Buffer.isBuffer(param)) {
+        console.error(`[DB ERROR] Parameter at index ${i} has invalid type:`, type, param);
+        throw new Error(`Parameter at index ${i} is type ${type}, expected string/number/bigint/buffer/null`);
+      }
+    }
+
+    const result = insert.run(...params);
 
     console.log(`[DB] Created item: ${itemData.name} (ID: ${result.lastInsertRowid})`);
 
@@ -131,16 +151,15 @@ class Item {
    * @param {number} itemId
    * @param {number} playerId
    * @param {number} purchasePrice
-   * @param {string} sessionId
    * @returns {number} inventory_id
    */
-  static addToInventory(itemId, playerId, purchasePrice, sessionId) {
+  static addToInventory(itemId, playerId, purchasePrice) {
     const insert = db.prepare(`
-      INSERT INTO player_inventory (player_id, item_id, purchase_price_gp, purchased_in_session_id)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO player_inventory (player_id, item_id, purchase_price_gp)
+      VALUES (?, ?, ?)
     `);
 
-    const result = insert.run(playerId, itemId, purchasePrice, sessionId);
+    const result = insert.run(playerId, itemId, purchasePrice);
 
     console.log(`[DB] Added item ${itemId} to player ${playerId} inventory (inventory_id: ${result.lastInsertRowid})`);
 

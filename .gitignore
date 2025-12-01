@@ -2,5 +2,6 @@ node_modules/
 .env
 cbn_sessions.json
 cost_tracking.json
+data/
 *.log
 .DS_Store

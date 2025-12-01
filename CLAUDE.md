@@ -6,26 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Discord bot that creates a **diegetic magic item collection game** powered by Claude AI. Players interact with the "Crystal Ball Network" - a mysterious interdimensional merchant - through emoji reactions and persistent inventory threads.
 
-### Current Development Phase: Architecture Redesign
+### Current Development Phase: Phase 1 Complete
 
-The bot is being redesigned from a chat-based prototype into a **reaction-driven collection game** with clear separation between ephemeral shopping sessions and persistent inventory management. Currently in **Phase 1: Core Backend Integration**.
+Core collection game is functional. Players browse items via `!search`, purchase with 🛒 emoji reactions, and build persistent inventories.
 
-**What works now:**
-- Claude AI generates unique items with two-shot pricing system
-- Session-based conversations in Discord threads
-- Multi-model support (Sonnet/Haiku/GPT-4o-mini)
-- Cost tracking and budget limits
-- SQLite database schema (needs session_type column added)
+**Working features:**
+- One-command setup with `!bootstrap`
+- Auto-inventory creation on member join (500gp starting balance)
+- Ephemeral search threads (1hr auto-archive)
+- AI-generated items with two-shot pricing
+- Optional budget filtering via `filterByBudget` JSON field
+- Emoji purchases (🛒) with balance validation
+- Locked read-only inventory threads
+- Balance-aware personality (rude when broke, obsequious when rich)
 
-**What's being built:**
-- Diegetic #crystal-ball-network portal channel
-- Member join event → auto-create inventory threads with 500gp
-- !search command → ephemeral shopping threads
-- One-item-per-message display format
-- Emoji-based purchasing (🛒 to buy, 💰 to sell)
-- Persistent inventory threads showing player collections
-
-See [docs/ROADMAP.md](docs/ROADMAP.md) for complete development plan.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for Phase 2+ features.
 
 ## Development Commands
 
@@ -42,28 +37,27 @@ npm start
 
 ## Key Architecture Patterns
 
-### New Channel Structure
+### Channel Structure
 
 ```
 CRYSTAL BALL NETWORK (Category)
 ├── #welcome - Info about the bot
-├── #about-cbn - Lore and technology
 ├── #crystal-ball-network - Diegetic portal (accepts !search only)
 └── Private Threads:
-    ├── search-[username]-[id] - Ephemeral shopping (24hr auto-archive)
-    ├── sell-[username]-[id] - Ephemeral selling (24hr, Phase 2)
-    └── inventory-[username] - Persistent collection (never archives)
+    ├── search-[username]-[id] - Ephemeral shopping (1hr auto-archive)
+    ├── inventory-[username] - Persistent collection (locked, never archives)
+    └── sell-[username]-[id] - Ephemeral selling (Phase 2)
 ```
 
 ### Core Principles
 
-1. **Diegetic immersion** - Flavor text creates atmosphere in #crystal-ball-network
-2. **One item per message** - Each item gets its own Discord message for clean reactions
-3. **Emoji-driven interactions** - React 🛒 to buy, 💰 to sell (minimal text commands)
-4. **Persistent inventory threads** - Each player's collection lives in a permanent thread
-5. **Ephemeral sessions** - Shopping/selling sessions auto-archive after 24hr
-6. **Fixed starting balance** - All players start with 500gp (no Benford's Law)
-7. **No equipping** - This is a collection game, not a combat simulator
+1. **Diegetic immersion** - Split greeting (static intro + AI-generated balance-aware message)
+2. **One item per message** - Each item gets its own Discord message with emoji reaction
+3. **Emoji-driven interactions** - React 🛒 to buy, 💰 to sell (Phase 2)
+4. **Locked inventory threads** - Read-only display of player collections
+5. **Optional budget filtering** - Claude sets `filterByBudget: true` in JSON when requested
+6. **Fixed starting balance** - All players start with 500gp
+7. **Comedic personality tiers** - Rudeness scales with poverty for entertainment
 
 ### Player Onboarding Flow
 
@@ -116,20 +110,6 @@ Item generation uses a two-model approach (bot.js:491-574):
 4. Pricing prompt in `src/cbn_pricing_prompt.md` contains D&D 5e pricing framework
 
 This separation allows main model to focus on creative generation while cheap model handles price calculation based on rarity and complications.
-
-### Session Management
-
-**Old system (being phased out):**
-- Sessions stored in `src/cbn_sessions.json`
-- Benford's Law balance generation
-- Greeting injected into conversation history
-
-**New system (being implemented):**
-- Sessions tracked in database via `shopping_sessions` table
-- Each session has `session_type` field: 'search', 'sell', 'craft' (future)
-- Fixed 500gp starting balance
-- Player balance persists in database `players` table
-- Inventory threads are permanent, search/sell threads are ephemeral
 
 ### Database Layer (SQLite)
 
@@ -216,22 +196,6 @@ Cost tracking prevents NaN issues with validation:
 - Tracks per-session, per-player, and per-day spending
 - Daily budget limits enforced before processing messages
 - All cost data saved to `src/cost_tracking.json`
-
-### Item Schema and Formatting
-
-Items follow JSON schema in `src/item_schema.json` with required fields:
-- `name`, `itemType`, `rarity`, `requiresAttunement`
-- `description`, `history`, `properties`, `complication`
-- `priceGp` (filled by pricing system)
-
-**Old system:**
-- `parseAndFormatResponse()` formats multiple items in one message
-- `formatItemAsMarkdown()` handles individual item formatting
-
-**New system:**
-- Each item becomes a separate Discord message
-- Need to refactor formatting to support one-item-per-message
-- Each message gets 🛒 reaction added immediately after posting
 
 ## File Structure
 

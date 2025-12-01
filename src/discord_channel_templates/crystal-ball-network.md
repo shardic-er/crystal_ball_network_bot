@@ -6,7 +6,13 @@ A voice emanates from everywhere and nowhere:
 
 *"Welcome, traveler. I am the Curator of Bewildering Networks. I can help you acquire wondrous items... or relieve you of those you no longer need. What brings you to my domain today?"*
 
-**Available Commands:**
-`!search` - Browse items for purchase
+**How to Use:**
+Simply type what you're looking for in this channel. The Curator will create a private browsing session and show you matching items.
 
-Type `!search` to begin your journey...
+**Examples:**
+- `magic swords`
+- `healing potions`
+- `items for a wizard`
+- `cheap uncommon items`
+
+The crystal ball awaits your command...

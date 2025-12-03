@@ -1,7 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, AttachmentBuilder, Partials } = require('discord.js');
 const Anthropic = require('@anthropic-ai/sdk');
-const OpenAI = require('openai');
 const fs = require('fs').promises;
 const path = require('path');
 const { Player, InventoryThread, Item } = require('./database/models');
@@ -25,10 +24,6 @@ const anthropic = new Anthropic({
   apiKey: process.env.CLAUDE_API_KEY
 });
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
 const SESSIONS_FILE = path.join(__dirname, 'cbn_sessions.json');
 const COST_TRACKING_FILE = path.join(__dirname, 'cost_tracking.json');
 const CBN_PROMPT_PATH = path.join(__dirname, 'cbn_system_prompt.md');
@@ -36,7 +31,7 @@ const CBN_PRICING_PROMPT_PATH = path.join(__dirname, 'cbn_pricing_prompt.md');
 const TEMPLATES_DIR = path.join(__dirname, 'discord_channel_templates');
 const GAME_CHANNEL_NAME = 'crystal-ball-network';
 const ACCOUNTS_CHANNEL_NAME = 'accounts';
-const ALLOWED_COMMANDS = ['!start', '!bootstrap', '!share', '!cost', '!fast', '!fancy'];
+const ALLOWED_COMMANDS = ['!bootstrap', '!cost', '!fast', '!fancy'];
 
 // Model configurations
 const MODEL_CONFIGS = {
@@ -57,16 +52,6 @@ const MODEL_CONFIGS = {
     cacheWriteCostPer1M: 1.25,
     cacheReadCostPer1M: 0.10,
     dailyBudgetLimit: 10.00
-  },
-  cheap: {
-    model: 'gpt-4o-mini',
-    provider: 'openai',
-    inputCostPer1M: 0.25,
-    outputCostPer1M: 2.00,
-    cacheWriteCostPer1M: 0.025,
-    cacheReadCostPer1M: 0.025,
-    dailyBudgetLimit: 10.00,
-    maxContextTokens: 128000
   }
 };
 
@@ -110,91 +95,6 @@ let costTracking = {
   sessionSpend: {},
   playerLifetimeCost: {}
 };
-
-// Benford's Law implementation for generating natural-looking account balances
-function generateBenfordBalance() {
-  // Benford's Law distribution for first digit (1-9)
-  const benfordProbabilities = [
-    0.301, // 1
-    0.176, // 2
-    0.125, // 3
-    0.097, // 4
-    0.079, // 5
-    0.067, // 6
-    0.058, // 7
-    0.051, // 8
-    0.046  // 9
-  ];
-
-  // Generate first digit using Benford's distribution
-  const rand = Math.random();
-  let cumulative = 0;
-  let firstDigit = 1;
-
-  for (let i = 0; i < benfordProbabilities.length; i++) {
-    cumulative += benfordProbabilities[i];
-    if (rand < cumulative) {
-      firstDigit = i + 1;
-      break;
-    }
-  }
-
-  // Add 2-4 additional random digits
-  const additionalDigits = Math.floor(Math.random() * 3) + 2; // 2, 3, or 4
-  let balance = firstDigit;
-
-  for (let i = 0; i < additionalDigits; i++) {
-    balance = balance * 10 + Math.floor(Math.random() * 10);
-  }
-
-  return balance;
-}
-
-// Generate CBN greeting based on account balance
-function generateCBNGreeting(accountBalance) {
-  let greetingTone;
-  let balanceComment;
-
-  if (accountBalance >= 10000) {
-    greetingTone = "Welcome back, most esteemed patron! It is our HONOR to serve you today!";
-    balanceComment = "Your substantial balance reflects your status as one of our most valued customers.";
-  } else if (accountBalance >= 1000) {
-    greetingTone = "Greetings, valued customer!";
-    balanceComment = "A healthy balance for exploring our marketplace.";
-  } else if (accountBalance >= 100) {
-    greetingTone = "Welcome, adventurer.";
-    balanceComment = "You have funds available for browsing our more affordable selections.";
-  } else if (accountBalance >= 10) {
-    greetingTone = "Welcome. Current balance noted.";
-    balanceComment = "Limited selections available at your price point.";
-  } else if (accountBalance >= 0) {
-    greetingTone = "Welcome. Your account requires attention.";
-    balanceComment = "Perhaps you'd like to DEPOSIT funds or SELL items to increase your balance?";
-  } else {
-    greetingTone = "Welcome. Your account is OVERDRAWN.";
-    balanceComment = "Browse only - purchases disabled until balance restored.";
-  }
-
-  return `*The crystal ball's surface ripples like quicksilver before resolving into soft, glowing text...*
-
-**Welcome to the Crystal Ball Network**
-*Powered by the White Tower Banking Company*
-
-${greetingTone}
-
-Your current account balance is **${accountBalance} gold pieces**. ${balanceComment}
-
-**How can the CBN assist you today?**
-
-- **SHOP**: Speak your search query to browse magical items from across the realm
-- **SELL**: Describe an item you wish to list on the CBN marketplace
-- **DEPOSIT**: Add gold to your CBN account for future purchases
-- **WITHDRAW**: Transfer gold from your CBN account to physical currency
-- **FINANCIAL PRODUCTS**: Browse White Tower Banking investment opportunities - annuities, stocks, and bonds
-- **ACCOUNT**: View transaction history and account details
-
-*The network awaits your command. What treasures do you seek?*`;
-}
 
 async function initialize() {
   console.log('Loading CBN system prompt...');
@@ -395,46 +295,16 @@ async function sendToClaudeAPI(messages, threadId, accountBalance, forceModel = 
     content: msg.content
   }));
 
-  if (config.provider === 'anthropic') {
-    const response = await anthropic.messages.create({
-      model: config.model,
-      max_tokens: 2048,
-      system: getSystemPrompt(accountBalance),
-      messages: cleanMessages
-    });
+  const response = await anthropic.messages.create({
+    model: config.model,
+    max_tokens: 2048,
+    system: getSystemPrompt(accountBalance),
+    messages: cleanMessages
+  });
 
-    await trackCost(threadId, response.usage);
+  await trackCost(threadId, response.usage);
 
-    return { text: response.content[0].text, shouldFilterByBudget: false };
-  } else if (config.provider === 'openai') {
-    const systemPrompt = getSystemPrompt(accountBalance);
-    const systemMessage = systemPrompt.map(p => p.text).join('\n\n');
-
-    const openaiMessages = [
-      { role: 'system', content: systemMessage },
-      ...cleanMessages
-    ];
-
-    const response = await openai.chat.completions.create({
-      model: config.model,
-      messages: openaiMessages,
-      max_tokens: 2048
-    });
-
-    const usage = {
-      input_tokens: response.usage.prompt_tokens,
-      output_tokens: response.usage.completion_tokens,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0
-    };
-
-    await trackCost(threadId, usage);
-
-    // OpenAI doesn't support tool use in the same way, so always return false for budget filtering
-    return { text: response.choices[0].message.content, shouldFilterByBudget: false };
-  }
-
-  throw new Error(`Unknown provider: ${config.provider}`);
+  return { text: response.content[0].text };
 }
 
 function formatItemAsMarkdown(item, index, price) {
@@ -521,42 +391,16 @@ async function addPricingToItems(items, threadId) {
     const itemsForPricing = JSON.stringify(items, null, 2);
     console.log(`[PRICING] Sending ${itemsForPricing.length} characters to pricing model`);
 
-    let pricingResponse;
-    const pricingModel = config.provider === 'anthropic' ? 'claude-haiku-4-5' : 'gpt-4o-mini';
-    console.log(`[PRICING] Requesting prices from ${pricingModel}...`);
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 1024,
+      system: cbnPricingPromptContent,
+      messages: [{ role: 'user', content: itemsForPricing }]
+    });
 
-    if (config.provider === 'anthropic') {
-      const response = await anthropic.messages.create({
-        model: 'claude-haiku-4-5',
-        max_tokens: 1024,
-        system: cbnPricingPromptContent,
-        messages: [{ role: 'user', content: itemsForPricing }]
-      });
-
-      await trackCost(threadId, response.usage);
-      pricingResponse = response.content[0].text;
-      console.log(`[PRICING] Received response (${response.usage.input_tokens} input tokens, ${response.usage.output_tokens} output tokens)`);
-    } else if (config.provider === 'openai') {
-      const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          { role: 'system', content: cbnPricingPromptContent },
-          { role: 'user', content: itemsForPricing }
-        ],
-        max_tokens: 1024
-      });
-
-      const usage = {
-        input_tokens: response.usage.prompt_tokens,
-        output_tokens: response.usage.completion_tokens,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0
-      };
-
-      await trackCost(threadId, usage);
-      pricingResponse = response.choices[0].message.content;
-      console.log(`[PRICING] Received response (${usage.input_tokens} input tokens, ${usage.output_tokens} output tokens)`);
-    }
+    await trackCost(threadId, response.usage);
+    const pricingResponse = response.content[0].text;
+    console.log(`[PRICING] Received response (${response.usage.input_tokens} input tokens, ${response.usage.output_tokens} output tokens)`);
 
     console.log(`[PRICING] Raw pricing response:\n${pricingResponse}`);
 
@@ -647,7 +491,7 @@ async function loadAllChannelConfigs() {
         ? firstLine.replace(/^#+\s*/, '').substring(0, 100)
         : `Information about ${name}`;
 
-      const isReadOnly = name !== GAME_CHANNEL_NAME && name !== 'bot-commands';
+      const isReadOnly = name !== GAME_CHANNEL_NAME;
 
       configs.push({ name, topic, content, isReadOnly });
     }
@@ -924,85 +768,6 @@ function splitContent(content, maxLength = 2000) {
   }
 
   return chunks.length > 0 ? chunks : [content.substring(0, maxLength)];
-}
-
-async function shareStory(message, threadId) {
-  const session = cbnSessions[threadId];
-
-  const dmResponses = session.messages.filter(m => m.role === 'assistant');
-
-  if (dmResponses.length === 0) {
-    await message.reply('No CBN interactions to share yet. Start browsing the marketplace first!');
-    return;
-  }
-
-  const playerName = session.playerName;
-  const startDate = new Date(session.startedAt).toLocaleDateString();
-  const messageCount = session.messages.length;
-  const shortThreadId = threadId.substring(0, 8);
-
-  const header = `# ${playerName}'s Crystal Ball Network Session
-**Started:** ${startDate}
-**Thread ID:** ${shortThreadId}
-**Messages:** ${messageCount}
-
----
-
-`;
-
-  let storyText = header;
-  for (const msg of session.messages) {
-    if (msg.role === 'user') {
-      storyText += `**${playerName}:** ${msg.content}\n\n`;
-    } else {
-      storyText += `${msg.content}\n\n---\n\n`;
-    }
-  }
-
-  const sharedThreadName = `Share - ${playerName}: ${shortThreadId}`;
-
-  let sharedThread = null;
-
-  if (session.sharedThreadId) {
-    try {
-      sharedThread = await message.channel.threads.fetch(session.sharedThreadId);
-      await sharedThread.delete();
-      console.log(`Deleted existing shared thread: ${session.sharedThreadId}`);
-      sharedThread = null;
-    } catch (error) {
-      console.log('Shared thread not found or already deleted, creating new one');
-    }
-  }
-
-  const gameChannel = await message.guild.channels.fetch(message.channel.parentId);
-
-  sharedThread = await gameChannel.threads.create({
-    name: sharedThreadName,
-    autoArchiveDuration: 10080,
-    type: ChannelType.PublicThread,
-    reason: `Sharing CBN session for ${playerName}`
-  });
-
-  const chunks = splitMessage(storyText);
-  for (const chunk of chunks) {
-    await sharedThread.send(chunk);
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-
-  const filename = `${playerName}_${new Date().toISOString().split('T')[0]}_${shortThreadId}.md`;
-  const attachment = new AttachmentBuilder(Buffer.from(storyText), { name: filename });
-
-  await sharedThread.send({
-    content: '*Download your session transcript:*',
-    files: [attachment]
-  });
-
-  await sharedThread.setLocked(true);
-
-  session.sharedThreadId = sharedThread.id;
-  await saveSessions();
-
-  await message.reply(`Your CBN session has been shared! Check out: ${sharedThread.toString()}`);
 }
 
 async function showCostInfo(message, threadId) {
@@ -1355,7 +1120,6 @@ client.on('messageCreate', async (message) => {
         playerId: message.author.id,
         playerName: message.author.username,
         startedAt: new Date().toISOString(),
-        accountBalance: player.account_balance_gp,
         messages: [],
         modelMode: MODEL_MODE,
         sessionType: 'search'
@@ -1514,91 +1278,7 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // Handle bot-commands channel moderation
-  if (message.channel.name === 'bot-commands' && message.channel.type === ChannelType.GuildText) {
-    const isCommand = ALLOWED_COMMANDS.some(cmd => message.content.startsWith(cmd));
-
-    if (!isCommand) {
-      try {
-        await message.delete();
-        const warning = await message.channel.send(`${message.author}, please only use \`!start\` in this channel.`);
-        setTimeout(() => warning.delete().catch(() => {}), 5000);
-      } catch (error) {
-        console.error('Error moderating message:', error);
-      }
-      return;
-    }
-
-    // Handle !start command
-    if (message.content === '!start') {
-      try {
-        const threadName = `${message.author.username}'s CBN Session`;
-
-        const thread = await message.channel.threads.create({
-          name: threadName,
-          autoArchiveDuration: 1440,
-          type: ChannelType.PrivateThread,
-          reason: 'Starting a new Crystal Ball Network session'
-        });
-
-        await thread.members.add(message.author.id);
-
-        const guildOwnerId = message.guild.ownerId;
-        if (guildOwnerId !== message.author.id) {
-          await thread.members.add(guildOwnerId);
-        }
-
-        // Generate random balance using Benford's law
-        const accountBalance = generateBenfordBalance();
-
-        // Create session
-        cbnSessions[thread.id] = {
-          playerId: message.author.id,
-          playerName: message.author.username,
-          startedAt: new Date().toISOString(),
-          accountBalance: accountBalance,
-          messages: [],
-          modelMode: MODEL_MODE
-        };
-
-        await saveSessions();
-
-        // Generate and send greeting
-        const greeting = generateCBNGreeting(accountBalance);
-        await thread.send(greeting);
-
-        // Store greeting in session as assistant message
-        cbnSessions[thread.id].messages.push({
-          role: 'assistant',
-          content: greeting
-        });
-
-        await saveSessions();
-
-        // Delete the !start command
-        try {
-          await message.delete();
-        } catch (error) {
-          console.warn('Could not delete !start message:', error.message);
-        }
-
-        const confirmation = await message.channel.send(
-          `*This message will self-destruct in 60 seconds.*\n\n${message.author}, your Crystal Ball Network session begins! Check the thread "${thread.name}".`
-        );
-        setTimeout(async () => {
-          try {
-            await confirmation.delete();
-          } catch (error) {
-            console.warn('Could not delete confirmation message:', error.message);
-          }
-        }, 60000);
-      } catch (error) {
-        console.error('Error creating thread:', error);
-        await message.reply('Sorry, there was an error starting your session. Please try again.');
-      }
-      return;
-    }
-  }
+  // bot-commands channel is no longer used - legacy code removed
 
   // Handle messages in threads
   if (!message.channel.isThread()) return;
@@ -1612,11 +1292,6 @@ client.on('messageCreate', async (message) => {
   if (message.author.id !== session.playerId) return;
 
   // Handle commands
-  if (message.content === '!share') {
-    await shareStory(message, threadId);
-    return;
-  }
-
   if (message.content === '!cost') {
     await showCostInfo(message, threadId);
     return;
@@ -1665,8 +1340,15 @@ client.on('messageCreate', async (message) => {
   await message.channel.sendTyping();
 
   try {
-    // Send to Claude/OpenAI for item generation
-    const apiResponse = await sendToClaudeAPI(session.messages, threadId, session.accountBalance);
+    // Get fresh player balance from database
+    const player = Player.getByDiscordId(session.playerId);
+    if (!player) {
+      await message.reply('Error: Player not found. Please try again.');
+      return;
+    }
+
+    // Send to Claude/OpenAI for item generation with current balance
+    const apiResponse = await sendToClaudeAPI(session.messages, threadId, player.account_balance_gp);
     const rawResponse = apiResponse.text;
 
     // Parse and format response
@@ -1692,13 +1374,13 @@ client.on('messageCreate', async (message) => {
         affordablePrices = [];
 
         for (let i = 0; i < parsed.items.length; i++) {
-          if (prices[i] <= session.accountBalance) {
+          if (prices[i] <= player.account_balance_gp) {
             affordableItems.push(parsed.items[i]);
             affordablePrices.push(prices[i]);
           }
         }
 
-        console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${session.accountBalance}gp)`);
+        console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${player.account_balance_gp}gp)`);
       } else {
         console.log('[FILTER] No budget filtering - showing all items');
       }
@@ -1707,12 +1389,12 @@ client.on('messageCreate', async (message) => {
       if (affordableItems.length === 0) {
         await message.channel.send(
           `*The Curator rubs their temples and sighs.*\n\n` +
-          `"I'm afraid ALL the items I was about to show you exceed your current balance of **${session.accountBalance} gp**. ` +
+          `"I'm afraid ALL the items I was about to show you exceed your current balance of **${player.account_balance_gp} gp**. ` +
           `Perhaps try a more... modest search query? Or consider items of common or uncommon rarity within your price range."`
         );
 
         // Store a summary for conversation history
-        finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the player's ${session.accountBalance}gp budget.`;
+        finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the player's ${player.account_balance_gp}gp budget.`;
       } else {
         // Send intro message if present
         if (parsed.rawJson?.message) {

@@ -36,7 +36,7 @@ const CBN_PRICING_PROMPT_PATH = path.join(__dirname, 'cbn_pricing_prompt.md');
 const TEMPLATES_DIR = path.join(__dirname, 'discord_channel_templates');
 const GAME_CHANNEL_NAME = 'crystal-ball-network';
 const ACCOUNTS_CHANNEL_NAME = 'accounts';
-const ALLOWED_COMMANDS = ['!start', '!bootstrap', '!share', '!cost', '!fast', '!fancy', '!cheap', '!search'];
+const ALLOWED_COMMANDS = ['!start', '!bootstrap', '!share', '!cost', '!fast', '!fancy'];
 
 // Model configurations
 const MODEL_CONFIGS = {
@@ -384,9 +384,9 @@ Remember to adjust your tone and suggestions based on this balance according to 
   ];
 }
 
-async function sendToClaudeAPI(messages, threadId, accountBalance) {
+async function sendToClaudeAPI(messages, threadId, accountBalance, forceModel = null) {
   const session = cbnSessions[threadId];
-  const playerModelMode = session?.modelMode || MODEL_MODE;
+  const playerModelMode = forceModel || session?.modelMode || MODEL_MODE;
   const config = MODEL_CONFIGS[playerModelMode];
 
   // Strip out itemsData before sending to API (it's only for our internal tracking)
@@ -1040,7 +1040,7 @@ async function showCostInfo(message, threadId) {
       }
     )
     .setFooter({
-      text: `Use !fast (haiku), !fancy (sonnet), or !cheap (gpt-4o-mini) to switch models`
+      text: `Use !fast (haiku) or !fancy (sonnet) to switch models`
     });
 
   await message.reply({ embeds: [embed] });
@@ -1361,39 +1361,20 @@ client.on('messageCreate', async (message) => {
         sessionType: 'search'
       };
 
-      // Send immediate acknowledgment with balance-appropriate tone
-      let searchingMessage = '';
-      if (player.account_balance_gp >= 10000) {
-        searchingMessage = `*The crystal ball flickers to life with brilliant, welcoming radiance*\n\nMOST ESTEEMED PATRON! Your account balance is **${player.account_balance_gp} gp** - truly magnificent! It is my HONOR to search for "${userQuery}" immediately!\n\n*The network hums with eager energy as I compile the finest selections for you...*`;
-      } else if (player.account_balance_gp >= 1000) {
-        searchingMessage = `*The crystal ball flickers to life with a warm, professional glow*\n\nWelcome back, valued customer! Your account balance is **${player.account_balance_gp} gp**. Searching for "${userQuery}"...\n\n*The network processes your request...*`;
-      } else if (player.account_balance_gp >= 100) {
-        searchingMessage = `*The crystal ball flickers to life with a businesslike shimmer*\n\nYour account balance is **${player.account_balance_gp} gp**. Searching for "${userQuery}"... let's see what we have in your price range.\n\n*The network searches...*`;
-      } else if (player.account_balance_gp >= 10) {
-        searchingMessage = `*The crystal ball flickers to life with a distinctly unenthusiastic shimmer*\n\n*Sigh.* Another window shopper. Your account balance is **${player.account_balance_gp} gp**. You want "${userQuery}"? Let me see what scraps I can find...\n\n*The network searches with minimal enthusiasm...*`;
-      } else {
-        searchingMessage = `*The crystal ball flickers to life with a distinctly unenthusiastic shimmer*\n\nOh. Another window shopper. Your account balance is **${player.account_balance_gp} gp** - that's right, ${player.account_balance_gp === 0 ? 'ZERO. Zilch. Nada. Nothing.' : 'practically nothing.'}  Why are you even HERE?\n\n*Heavy, theatrical sigh*\n\nBut FINE, I suppose I'll show you "${userQuery}" since you asked. Not that you can afford ANY of them. Maybe this will motivate you to go do some ACTUAL adventuring and come back when you have REAL money.\n\n*The network searches, grudgingly...*`;
-      }
+      // Send neutral "shimmer" message immediately
+      const shimmerMessage = `*The crystal ball shimmers to life...*`;
+      await thread.send(shimmerMessage);
 
-      await thread.send(searchingMessage);
-
-      // Add the searching message to history so AI doesn't repeat it
-      cbnSessions[thread.id].messages.push({
-        role: 'assistant',
-        content: searchingMessage
-      });
-
-      // Now send the user's actual search query
+      // Now process the user's query with the AI
       await thread.sendTyping();
-
-      const userPrompt = `"${userQuery}"`;
 
       cbnSessions[thread.id].messages.push({
         role: 'user',
-        content: userPrompt
+        content: userQuery
       });
 
-      const apiResponse = await sendToClaudeAPI(cbnSessions[thread.id].messages, thread.id, player.account_balance_gp);
+      // Use Haiku for faster item generation
+      const apiResponse = await sendToClaudeAPI(cbnSessions[thread.id].messages, thread.id, player.account_balance_gp, 'haiku');
       const rawResponse = apiResponse.text;
 
       // Parse and format response
@@ -1655,10 +1636,9 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // !cheap command disabled for compatibility issues
   if (message.content === '!cheap') {
-    session.modelMode = 'cheap';
-    await saveSessions();
-    await message.reply('Switched to cheap mode (GPT-4o-mini). Very low cost.');
+    await message.reply('The !cheap command (GPT-4o-mini) has been disabled due to compatibility issues. Please use !fast (haiku) or !fancy (sonnet) instead.');
     return;
   }
 

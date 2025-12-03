@@ -8,6 +8,6 @@
 
 ---
 
-Visit #crystal-ball-network and type `!search` to begin browsing items.
+Visit #crystal-ball-network and type your search query to begin browsing items.
 
 Items you purchase will appear below this message...

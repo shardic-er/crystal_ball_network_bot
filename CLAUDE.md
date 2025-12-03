@@ -8,7 +8,7 @@ A Discord bot that creates a **diegetic magic item collection game** powered by 
 
 ### Current Development Phase: Phase 1 Complete
 
-Core collection game is functional. Players browse items via `!search`, purchase with 🛒 emoji reactions, and build persistent inventories.
+Core collection game is functional. Players browse items by typing search queries directly in #crystal-ball-network, purchase with 🛒 emoji reactions, and build persistent inventories.
 
 **Working features:**
 - One-command setup with `!bootstrap`
@@ -42,7 +42,7 @@ npm start
 ```
 CRYSTAL BALL NETWORK (Category)
 ├── #welcome - Info about the bot
-├── #crystal-ball-network - Diegetic portal (accepts !search only)
+├── #crystal-ball-network - Diegetic portal (accepts direct search queries)
 └── Private Threads:
     ├── search-[username]-[id] - Ephemeral shopping (1hr auto-archive)
     ├── inventory-[username] - Persistent collection (locked, never archives)
@@ -67,16 +67,17 @@ When a player joins the server (`guildMemberAdd` event):
 2. Bot creates persistent private thread: `inventory-[username]`
 3. Bot creates player in database with `Player.getOrCreate(discordId, username, 500)`
 4. Bot posts header message in inventory thread showing 500gp balance
-5. Player can immediately go to #crystal-ball-network and type !search
+5. Player can immediately go to #crystal-ball-network and type a search query
 
 **Critical:** Inventory threads are created on join, NOT on first search.
 
 ### Shopping Flow
 
 **Step 1: Enter portal**
-- User types `!search` in #crystal-ball-network channel
-- Bot creates ephemeral thread: `search-[username]-[timestamp]`
-- Bot posts brief confirmation in channel, then deletes both after 3 seconds
+- User types search query directly in #crystal-ball-network channel (e.g., "magic swords")
+- Bot deletes user's message immediately
+- Bot creates ephemeral thread: `search-[username]-[query]`
+- Bot posts brief "Opening search portal" confirmation in channel, then deletes after 3 seconds
 - Channel stays clean showing only diegetic prompt
 
 **Step 2: Browse items**
@@ -171,7 +172,7 @@ The first message in each inventory thread is a header that updates after every 
 
 ---
 
-Visit #crystal-ball-network and type `!search` to begin browsing items.
+Visit #crystal-ball-network and type your search query to begin browsing items.
 
 Items you purchase will appear below this message...
 ```
@@ -245,11 +246,11 @@ Critical Discord bot permissions:
 4. Bot posts header message in inventory thread
 
 **Player starts shopping:**
-1. User sends `!search` in #crystal-ball-network channel
-2. Bot creates `search-[username]-[timestamp]` thread
-3. Bot posts greeting with balance
-4. User sends query in thread
-5. Bot calls `sendToClaudeAPI()` with search system prompt
+1. User types search query directly in #crystal-ball-network channel (e.g., "magic swords")
+2. Bot deletes user's message immediately
+3. Bot creates `search-[username]-[query]` thread
+4. Bot posts balance-aware "searching" message immediately
+5. Bot calls `sendToClaudeAPI()` with search query
 6. Claude generates items (JSON format)
 7. Bot calls `addPricingToItems()` for second shot
 8. **Bot sends each item as separate message with 🛒 reaction**
@@ -279,7 +280,7 @@ Critical Discord bot permissions:
 ## Common Pitfalls
 
 1. **Don't create multiple items per message**: Each item MUST be its own Discord message
-2. **Don't create inventory threads on !search**: Inventory threads created on member join
+2. **Don't create inventory threads on search**: Inventory threads created on member join
 3. **Don't use Benford's Law**: Fixed 500gp starting balance for all players
 4. **Don't implement equipping**: This is a collection game, not combat
 5. **Don't skip member join handler**: Critical for inventory creation
@@ -293,14 +294,14 @@ Critical Discord bot permissions:
 
 When implementing new features, follow this priority order:
 
-1. **Phase 1 (Current):** Reaction-based purchasing
-   - Update !bootstrap for #crystal-ball-network channel
-   - Implement guildMemberAdd for inventory creation
-   - Implement !search command
-   - Refactor to one-item-per-message display
-   - Add 🛒 reaction handler
-   - Move items between threads on purchase
-   - Update inventory headers
+1. **Phase 1 (Completed):** Reaction-based purchasing
+   - ✅ Update !bootstrap for #crystal-ball-network channel
+   - ✅ Implement guildMemberAdd for inventory creation
+   - ✅ Implement seamless search (direct queries, no command needed)
+   - ✅ Refactor to one-item-per-message display
+   - ✅ Add 🛒 reaction handler
+   - ✅ Move items between threads on purchase
+   - ✅ Update inventory headers
 
 2. **Phase 2:** Selling system
    - Implement 💰 reaction handler
@@ -334,7 +335,7 @@ To modify database schema:
 ## Discord Commands
 
 **In #crystal-ball-network channel:**
-- `!search` - Create ephemeral shopping session
+- Type any search query directly (e.g., "magic swords", "healing potions")
 
 **In any channel (admin):**
 - `!bootstrap` - (Owner only) Create/refresh category and channels
@@ -350,7 +351,8 @@ To modify database schema:
 - 💰 - Sell item (in inventory threads, Phase 2)
 
 **Removed commands:**
-- ❌ `!start` - Replaced by !search
+- ❌ `!search` - Replaced by direct search queries
+- ❌ `!start` - Replaced by direct search queries
 - ❌ `!inventory` - Inventory is a persistent thread
 - ❌ `!balance` - Check inventory thread header
 - ❌ `!sell` - Use 💰 reaction instead
@@ -401,10 +403,16 @@ A voice emanates from everywhere and nowhere:
 
 *"Welcome, traveler. I am the Curator of Bewildering Networks. I can help you acquire wondrous items... or relieve you of those you no longer need. What brings you to my domain today?"*
 
-**Available Commands:**
-`!search` - Browse items for purchase
+**How to Use:**
+Simply type what you're looking for in this channel. The Curator will create a private browsing session and show you matching items.
 
-Type `!search` to begin your journey...
+**Examples:**
+- `magic swords`
+- `healing potions`
+- `items for a wizard`
+- `cheap uncommon items`
+
+The crystal ball awaits your command...
 ```
 
 ### Search Thread Greeting
@@ -430,7 +438,7 @@ Describe what you're looking for, and I'll show you what I have in stock...
 
 ---
 
-Visit #crystal-ball-network and type `!search` to begin browsing items.
+Visit #crystal-ball-network and type your search query to begin browsing items.
 
 Items you purchase will appear below this message...
 ```

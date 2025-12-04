@@ -343,34 +343,42 @@ async function displayParsedResponse({ channel, parsed, rawResponse, player, thr
   if (parsed.type === 'items') {
     const prices = await addPricingToItems(parsed.items, threadId);
     const shouldFilterByBudget = parsed.rawJson?.filterByBudget === true;
+    const maxPriceGp = parsed.rawJson?.maxPriceGp;
 
     let affordableItems = parsed.items;
     let affordablePrices = prices;
+    let priceLimit = null;
 
     if (shouldFilterByBudget) {
-      console.log('[FILTER] Budget filtering requested by Claude (filterByBudget: true)');
-      affordableItems = [];
-      affordablePrices = [];
+      // Use maxPriceGp if specified, otherwise fall back to account balance
+      priceLimit = (maxPriceGp !== null && maxPriceGp !== undefined) ? maxPriceGp : player.account_balance_gp;
+      console.log(`[FILTER] Budget filtering requested by Claude (filterByBudget: true, maxPriceGp: ${maxPriceGp}, using limit: ${priceLimit}gp)`);
 
-      for (let i = 0; i < parsed.items.length; i++) {
-        if (prices[i] <= player.account_balance_gp) {
-          affordableItems.push(parsed.items[i]);
-          affordablePrices.push(prices[i]);
-        }
-      }
-
-      console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${player.account_balance_gp}gp)`);
+      // DEBUG: Temporarily disabled filtering - show all items regardless of price
+      console.log(`[FILTER] DEBUG MODE: Filtering disabled, showing all ${parsed.items.length} items`);
+      // affordableItems = [];
+      // affordablePrices = [];
+      // for (let i = 0; i < parsed.items.length; i++) {
+      //   if (prices[i] <= priceLimit) {
+      //     affordableItems.push(parsed.items[i]);
+      //     affordablePrices.push(prices[i]);
+      //   }
+      // }
+      // console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (limit: ${priceLimit}gp)`);
     } else {
       console.log('[FILTER] No budget filtering - showing all items');
     }
 
     if (affordableItems.length === 0) {
+      // Use the price limit if filtering was applied, otherwise use account balance
+      const budgetDisplay = priceLimit !== null ? priceLimit : player.account_balance_gp;
+      const budgetType = priceLimit !== null ? 'requested budget' : 'current balance';
       await channel.send(
         `*The Curator rubs their temples and sighs.*\n\n` +
-        `"I'm afraid ALL the items I was about to show you exceed your current balance of **${player.account_balance_gp} gp**. ` +
+        `"I'm afraid ALL the items I was about to show you exceed your ${budgetType} of **${budgetDisplay} gp**. ` +
         `Perhaps try a more... modest search query? Or consider items of common or uncommon rarity within your price range."`
       );
-      finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the player's ${player.account_balance_gp}gp budget.`;
+      finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the ${budgetDisplay}gp ${budgetType}.`;
     } else {
       if (parsed.rawJson?.message) {
         await channel.send(parsed.rawJson.message);
@@ -880,7 +888,8 @@ async function showCostInfo(message, threadId) {
 client.once('ready', async () => {
   await initialize();
   console.log(`Logged in as ${client.user.tag}`);
-  console.log(`Model mode: ${MODEL_MODE} (${COST_CONFIG.model})`);
+  console.log(`Default search model: haiku (claude-haiku-4-5)`);
+  console.log(`Use !fancy in threads to switch to sonnet`);
   console.log('Crystal Ball Network is online!');
 });
 
@@ -1181,13 +1190,13 @@ client.on('messageCreate', async (message) => {
       // Add member to thread
       await thread.members.add(message.author.id);
 
-      // Create session with user's query
+      // Create session with user's query (default to haiku for searches)
       cbnSessions[thread.id] = {
         playerId: message.author.id,
         playerName: message.author.username,
         startedAt: new Date().toISOString(),
         messages: [],
-        modelMode: MODEL_MODE,
+        modelMode: 'haiku',
         sessionType: 'search'
       };
 

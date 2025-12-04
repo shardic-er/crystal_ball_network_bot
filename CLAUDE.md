@@ -8,6 +8,8 @@ A **diegetic magic item collection game** where players interact with "The Curat
 
 **Phase 1 Complete:** Seamless search, reaction-based purchasing, persistent inventory, balance-aware personality.
 
+**Phase 2 Complete:** Selling system with AI-generated buyers, instant sales, and price negotiation.
+
 ## Quick Reference
 
 ```bash
@@ -17,9 +19,12 @@ npm start          # Production mode
 ```
 
 **Key files:**
-- `src/bot.js` - Main bot logic (1486 lines)
+- `src/bot.js` - Main bot logic
 - `src/cbn_system_prompt.md` - The Curator's personality (editable without restart)
 - `src/cbn_pricing_prompt.md` - Pricing framework (editable without restart)
+- `src/cbn_buyer_prompt.md` - Buyer generation for selling (editable without restart)
+- `src/cbn_negotiation_prompt.md` - Buyer negotiation personality (editable without restart)
+- `src/cbn_offer_classifier_prompt.md` - Price offer detection (editable without restart)
 - `src/database/` - SQLite database with models
 
 ## Architecture Patterns
@@ -33,15 +38,16 @@ CRYSTAL BALL NETWORK (Category)
 ├── #accounts - Container for inventory threads
 └── Private Threads:
     ├── search-[username]-[query] - Ephemeral (1hr auto-archive)
+    ├── sell-[username]-[itemname] - Ephemeral (1hr auto-archive)
     └── inventory-[username] - Persistent, locked, never archives
 ```
 
 ### Core Principles
 
-1. **One item per message** - Each item is a separate Discord message with 🛒 reaction
+1. **One item per message** - Each item is a separate Discord message with cart reaction
 2. **Diegetic immersion** - All interactions stay in-character
-3. **Emoji-driven** - React 🛒 to buy (💰 for selling in Phase 2)
-4. **Balance-aware personality** - Curator's tone scales with player wealth (obsequious → rude)
+3. **Emoji-driven** - React cart to buy, scales to sell, speech bubble to negotiate, moneybag to accept offer
+4. **Balance-aware personality** - Curator's tone scales with player wealth (obsequious to rude)
 5. **Fixed 500gp start** - All players begin with same balance
 6. **Database-driven** - Balance always fetched fresh from DB, never cached
 
@@ -63,8 +69,24 @@ CRYSTAL BALL NETWORK (Category)
 **Purchase:**
 1. User clicks cart reaction -> Bot validates balance from DB
 2. If sufficient: `Player.deductGold()` -> `Item.create()` -> `Item.addToInventory()`
-3. Delete item from search thread -> Repost in inventory with moneybag reaction
+3. Delete item from search thread -> Repost in inventory with scales reaction
 4. Edit inventory header with new balance
+
+**Selling (Instant):**
+1. User clicks scales emoji on item in inventory thread
+2. Bot creates `sell-{username}-{itemname}` thread
+3. AI generates 3 prospective buyers with offers
+4. User clicks moneybag on buyer to accept offer
+5. `Item.removeFromInventory()` -> `Player.addGold()` -> Update inventory header
+6. Delete sell thread
+
+**Selling (Negotiation):**
+1. Instead of moneybag, user clicks speech bubble on a buyer
+2. Other buyers are removed, this buyer is locked in for negotiation
+3. User chats with buyer in thread - AI responds in character
+4. Offer classifier detects price offers in user messages
+5. When user makes acceptable offer, moneybag appears on that message
+6. User clicks moneybag to complete sale at negotiated price
 
 ### Two-Shot Pricing System
 
@@ -81,6 +103,19 @@ Item generation is split into two API calls to optimize costs:
 
 This separation allows creative generation to use any model while keeping pricing fast and cheap.
 
+### Selling System Pricing
+
+When selling, buyers re-price items blind to what the player paid:
+
+1. **Buyer Generation**: AI creates 3 buyers with `interestLevel` (low/medium/high)
+2. **Re-pricing**: Item is priced using same pricing model (naturally varies)
+3. **Interest Multipliers**: Applied to re-priced value
+   - `low`: 0.5-0.6x (buyers who need it but aren't excited)
+   - `medium`: 0.7-0.8x (fair market interest)
+   - `high`: 0.9-1.0x (buyer really wants the item)
+
+This creates natural price variance - players may profit or lose depending on luck and negotiation.
+
 ### Database Layer (SQLite)
 
 **Location:** `data/cbn.db` (auto-created from `src/database/schema.sql`)
@@ -89,7 +124,7 @@ This separation allows creative generation to use any model while keeping pricin
 - `players` - Discord accounts with `account_balance_gp` (500gp start)
 - `items` - Master catalog of all generated items
 - `player_inventory` - Items owned by players (ignore `equipped` column)
-- `transactions` - Audit log of purchases/sales (schema exists, not yet used)
+- `transactions` - Audit log of purchases/sales
 
 **Models:** `src/database/models/` - Player, Item, InventoryThread
 
@@ -116,16 +151,19 @@ src/
 ├── bot.js                       # Main bot logic
 ├── cbn_system_prompt.md         # Curator personality
 ├── cbn_pricing_prompt.md        # Pricing rules
+├── cbn_buyer_prompt.md          # Buyer generation for selling
+├── cbn_negotiation_prompt.md    # Buyer negotiation personality
+├── cbn_offer_classifier_prompt.md # Price offer detection
 ├── item_schema.json             # JSON schema for items
-├── cbn_sessions.json            # Active sessions (playerId, messages, modelMode)
+├── cbn_sessions.json            # Active sessions
 ├── cost_tracking.json           # API costs (auto-generated)
 ├── database/
 │   ├── db.js                    # SQLite connection (WAL mode)
 │   ├── schema.sql               # Auto-executed on first run
 │   ├── README.md                # Database docs
 │   └── models/
-│       ├── Player.js
-│       ├── Item.js
+│       ├── Player.js            # Player balance management
+│       ├── Item.js              # Item and inventory management
 │       └── InventoryThread.js
 ├── discord_channel_templates/   # Channel content templates
 │   ├── welcome.md
@@ -227,6 +265,13 @@ if (player.account_balance_gp >= price) {
   Item.addToInventory(item.item_id, player.player_id, price);
 }
 
+// On sale
+const result = Item.removeFromInventory(inventoryId, playerId);
+Player.addGold(playerId, salePrice);
+
+// Find item in inventory by name
+const invItem = Item.findInventoryByName(playerId, itemName);
+
 // Get inventory
 const items = Item.getPlayerInventory(playerId, true, false);
 ```
@@ -237,25 +282,33 @@ const items = Item.getPlayerInventory(playerId, true, false);
 
 **Pricing logic:** Edit `src/cbn_pricing_prompt.md` (takes effect immediately, no restart)
 
+**Buyer generation:** Edit `src/cbn_buyer_prompt.md` (takes effect immediately, no restart)
+
+**Negotiation style:** Edit `src/cbn_negotiation_prompt.md` (takes effect immediately, no restart)
+
 **Database schema:** Edit `src/database/schema.sql` then delete `data/cbn.db` to recreate
 
-**Balance tiers:** Edit personality thresholds in `src/cbn_system_prompt.md` lines 33-51
+**Balance tiers:** Edit personality thresholds in `src/cbn_system_prompt.md`
 
 ## Development Priorities
 
 **Phase 1 (Complete):**
-- ✅ Seamless search (direct queries, no commands)
-- ✅ One-item-per-message display
-- ✅ Emoji purchase flow (🛒)
-- ✅ Persistent inventory with database
-- ✅ Balance-aware personality
+- Seamless search (direct queries, no commands)
+- One-item-per-message display
+- Emoji purchase flow
+- Persistent inventory with database
+- Balance-aware personality
 
-**Phase 2 (Next):**
-- Selling system (💰 reaction in inventory)
-- Price negotiation
+**Phase 2 (Complete):**
+- Selling system (moneybag reaction in inventory)
+- AI-generated NPC buyers with varying offers
+- Price negotiation via speech bubble
+- Offer detection classifier
+
+**Phase 3 (Next):**
+- Crafting system
+- UI improvements
 - Transaction history viewing
-
-**Phase 3+:** Crafting, UI improvements, advanced features
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for complete roadmap.
 

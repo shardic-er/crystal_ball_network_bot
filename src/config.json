@@ -1,0 +1,28 @@
+{
+  "negotiation": {
+    "interestLevels": {
+      "low": {
+        "maxIncrease": 1.20,
+        "walkAwayThreshold": 1.5,
+        "description": "Stubborn, won't budge much, walks away quickly"
+      },
+      "medium": {
+        "maxIncrease": 1.45,
+        "walkAwayThreshold": 2.0,
+        "description": "Reasonable flexibility, moderate patience"
+      },
+      "high": {
+        "maxIncrease": 2.35,
+        "walkAwayThreshold": 2.36,
+        "description": "Really wants it, willing to increase offer significantly, very patient"
+      }
+    }
+  },
+  "threads": {
+    "searchAutoArchiveMinutes": 60,
+    "sellAutoArchiveMinutes": 60
+  },
+  "players": {
+    "startingBalanceGp": 500
+  }
+}

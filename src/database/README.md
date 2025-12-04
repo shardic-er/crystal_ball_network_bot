@@ -40,11 +40,20 @@ const item = Item.create({
 // Add to player inventory
 Item.addToInventory(item.item_id, player.player_id, 8000);
 
-// Deduct gold from player
+// Deduct gold from player (on purchase)
 Player.deductGold(player.player_id, 8000);
+
+// Add gold to player (on sale)
+Player.addGold(player.player_id, 7500);
 
 // Get player inventory
 const inventory = Item.getPlayerInventory(player.player_id);
+
+// Remove item from inventory (on sale - keeps item record, deletes ownership link)
+const result = Item.removeFromInventory(inventoryId, player.player_id);
+
+// Find inventory item by name
+const invItem = Item.findInventoryByName(player.player_id, 'Belt of Hill Giant Strength');
 ```
 
 ## Models
@@ -54,12 +63,16 @@ const inventory = Item.getPlayerInventory(player.player_id);
 - `getById(playerId)` - Get player by ID
 - `getByDiscordId(discordUserId)` - Get player by Discord ID
 - `deductGold(playerId, amount)` - Deduct gold (with validation)
+- `addGold(playerId, amount)` - Add gold (for sales)
 
 ### Item
 - `create(itemData, priceGp)` - Add item to catalog
 - `getById(itemId)` - Get item by ID
 - `addToInventory(itemId, playerId, purchasePrice)` - Add to player inventory
 - `getPlayerInventory(playerId, includeEquipped, includeSold)` - Get player's items
+- `getInventoryItem(inventoryId)` - Get single inventory item with joined data
+- `removeFromInventory(inventoryId, playerId)` - Delete ownership link (for sales)
+- `findInventoryByName(playerId, itemName)` - Find item by name in player inventory
 - `getStatistics()` - Get item statistics
 
 ### InventoryThread
@@ -73,9 +86,8 @@ SQLite database file: `data/cbn.db`
 
 ## Schema Notes
 
-The `transactions` and `shopping_sessions` tables exist in the schema for future use
-but the corresponding model classes have been removed as they were not yet integrated
-into the bot's purchase flow. These may be re-implemented in Phase 2.
+The `transactions` and `shopping_sessions` tables exist in the schema for audit logging
+and session tracking. Transaction records are created on purchases and sales.
 
 ## Backup
 

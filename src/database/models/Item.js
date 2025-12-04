@@ -285,6 +285,69 @@ class Item {
 
     return db.prepare(query).get(playerId).count;
   }
+
+  /**
+   * Remove item from player inventory (deletes the link, keeps item in items table)
+   * Used when selling items to NPCs
+   * @param {number} inventoryId - The inventory record ID
+   * @param {number} playerId - Player ID for ownership verification
+   * @returns {Object} { success: boolean, itemId: number }
+   */
+  static removeFromInventory(inventoryId, playerId) {
+    // First verify ownership
+    const item = Item.getInventoryItem(inventoryId);
+
+    if (!item) {
+      throw new Error(`Inventory item ${inventoryId} not found`);
+    }
+
+    if (item.player_id !== playerId) {
+      throw new Error(`Item ${inventoryId} is not owned by player ${playerId}`);
+    }
+
+    if (item.sold) {
+      throw new Error(`Item ${inventoryId} has already been sold`);
+    }
+
+    // Delete the inventory record (orphan the item)
+    const result = db.prepare(`
+      DELETE FROM player_inventory
+      WHERE inventory_id = ? AND player_id = ?
+    `).run(inventoryId, playerId);
+
+    if (result.changes === 0) {
+      throw new Error(`Failed to remove item ${inventoryId} from inventory`);
+    }
+
+    console.log(`[DB] Removed item ${item.item_id} from player ${playerId} inventory (inventory_id: ${inventoryId})`);
+
+    return {
+      success: true,
+      itemId: item.item_id,
+      itemName: item.name
+    };
+  }
+
+  /**
+   * Find inventory item by item name for a player
+   * Used when we need to look up an item from a Discord message
+   * @param {number} playerId
+   * @param {string} itemName
+   * @returns {Object|null} Inventory item with joined data
+   */
+  static findInventoryByName(playerId, itemName) {
+    return db.prepare(`
+      SELECT
+        inv.*,
+        items.*,
+        inv.purchase_price_gp as paid_price,
+        items.base_price_gp as catalog_price
+      FROM player_inventory inv
+      JOIN items ON inv.item_id = items.item_id
+      WHERE inv.player_id = ? AND items.name = ? AND inv.sold = 0
+      LIMIT 1
+    `).get(playerId, itemName);
+  }
 }
 
 module.exports = Item;

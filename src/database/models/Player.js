@@ -81,6 +81,24 @@ class Player {
     return Player.getById(playerId);
   }
 
+  /**
+   * Add gold to player account (for selling items)
+   */
+  static addGold(playerId, amount) {
+    if (amount < 0) {
+      throw new Error(`Cannot add negative gold amount: ${amount}`);
+    }
+
+    db.prepare(`
+      UPDATE players
+      SET account_balance_gp = account_balance_gp + ?,
+          last_active_at = CURRENT_TIMESTAMP
+      WHERE player_id = ?
+    `).run(amount, playerId);
+
+    return Player.getById(playerId);
+  }
+
 }
 
 module.exports = Player;

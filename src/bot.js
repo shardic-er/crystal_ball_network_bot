@@ -2,8 +2,13 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, Partials } = require('discord.js');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 const { Player, InventoryThread, Item } = require('./database/models');
+
+// Load config
+const CONFIG_PATH = path.join(__dirname, 'config.json');
+const config = JSON.parse(fsSync.readFileSync(CONFIG_PATH, 'utf-8'));
 
 const client = new Client({
   intents: [
@@ -28,6 +33,9 @@ const SESSIONS_FILE = path.join(__dirname, 'cbn_sessions.json');
 const COST_TRACKING_FILE = path.join(__dirname, 'cost_tracking.json');
 const CBN_PROMPT_PATH = path.join(__dirname, 'cbn_system_prompt.md');
 const CBN_PRICING_PROMPT_PATH = path.join(__dirname, 'cbn_pricing_prompt.md');
+const CBN_BUYER_PROMPT_PATH = path.join(__dirname, 'cbn_buyer_prompt.md');
+const CBN_NEGOTIATION_PROMPT_PATH = path.join(__dirname, 'cbn_negotiation_prompt.md');
+const CBN_OFFER_CLASSIFIER_PATH = path.join(__dirname, 'cbn_offer_classifier_prompt.md');
 const TEMPLATES_DIR = path.join(__dirname, 'discord_channel_templates');
 const GAME_CHANNEL_NAME = 'crystal-ball-network';
 const ACCOUNTS_CHANNEL_NAME = 'accounts';
@@ -88,6 +96,9 @@ if (!COST_CONFIG) {
 
 let cbnPromptContent = '';
 let cbnPricingPromptContent = '';
+let cbnBuyerPromptContent = '';
+let cbnNegotiationPromptContent = '';
+let cbnOfferClassifierContent = '';
 let cbnSessions = {};
 let costTracking = {
   dailySpend: {},
@@ -113,6 +124,36 @@ async function initialize() {
   } catch (error) {
     console.error('FATAL ERROR: Could not load CBN pricing prompt:', error);
     console.error('Make sure cbn_pricing_prompt.md exists in the src directory');
+    process.exit(1);
+  }
+
+  console.log('Loading CBN buyer prompt...');
+  try {
+    cbnBuyerPromptContent = await fs.readFile(CBN_BUYER_PROMPT_PATH, 'utf-8');
+    console.log('CBN buyer prompt loaded successfully');
+  } catch (error) {
+    console.error('FATAL ERROR: Could not load CBN buyer prompt:', error);
+    console.error('Make sure cbn_buyer_prompt.md exists in the src directory');
+    process.exit(1);
+  }
+
+  console.log('Loading CBN negotiation prompt...');
+  try {
+    cbnNegotiationPromptContent = await fs.readFile(CBN_NEGOTIATION_PROMPT_PATH, 'utf-8');
+    console.log('CBN negotiation prompt loaded successfully');
+  } catch (error) {
+    console.error('FATAL ERROR: Could not load CBN negotiation prompt:', error);
+    console.error('Make sure cbn_negotiation_prompt.md exists in the src directory');
+    process.exit(1);
+  }
+
+  console.log('Loading CBN offer classifier...');
+  try {
+    cbnOfferClassifierContent = await fs.readFile(CBN_OFFER_CLASSIFIER_PATH, 'utf-8');
+    console.log('CBN offer classifier loaded successfully');
+  } catch (error) {
+    console.error('FATAL ERROR: Could not load CBN offer classifier:', error);
+    console.error('Make sure cbn_offer_classifier_prompt.md exists in the src directory');
     process.exit(1);
   }
 
@@ -354,17 +395,15 @@ async function displayParsedResponse({ channel, parsed, rawResponse, player, thr
       priceLimit = (maxPriceGp !== null && maxPriceGp !== undefined) ? maxPriceGp : player.account_balance_gp;
       console.log(`[FILTER] Budget filtering requested by Claude (filterByBudget: true, maxPriceGp: ${maxPriceGp}, using limit: ${priceLimit}gp)`);
 
-      // DEBUG: Temporarily disabled filtering - show all items regardless of price
-      console.log(`[FILTER] DEBUG MODE: Filtering disabled, showing all ${parsed.items.length} items`);
-      // affordableItems = [];
-      // affordablePrices = [];
-      // for (let i = 0; i < parsed.items.length; i++) {
-      //   if (prices[i] <= priceLimit) {
-      //     affordableItems.push(parsed.items[i]);
-      //     affordablePrices.push(prices[i]);
-      //   }
-      // }
-      // console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (limit: ${priceLimit}gp)`);
+      affordableItems = [];
+      affordablePrices = [];
+      for (let i = 0; i < parsed.items.length; i++) {
+        if (prices[i] <= priceLimit) {
+          affordableItems.push(parsed.items[i]);
+          affordablePrices.push(prices[i]);
+        }
+      }
+      console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (limit: ${priceLimit}gp)`);
     } else {
       console.log('[FILTER] No budget filtering - showing all items');
     }
@@ -536,6 +575,342 @@ async function addPricingToItems(items, threadId) {
   }
 }
 
+// Interest level affects negotiation behavior (configured in config.json)
+const INTEREST_NEGOTIATION = config.negotiation.interestLevels;
+
+/**
+ * Generate prospective buyers for an item being sold
+ * @param {Object} item - Item data from inventory
+ * @param {string} threadId - Thread ID for cost tracking
+ * @returns {Promise<Object>} Parsed buyers JSON with calculated prices
+ */
+async function generateBuyers(item, threadId) {
+  console.log('=== BUYER GENERATION START ===');
+  console.log(`[BUYERS] Generating buyers for: ${item.name}`);
+
+  try {
+    // Format item for the buyer prompt
+    const itemJson = JSON.stringify({
+      name: item.name,
+      itemType: item.item_type,
+      rarity: item.rarity,
+      description: item.description,
+      history: item.history,
+      properties: item.properties,
+      complication: item.complication
+    }, null, 2);
+
+    // Generate buyers via AI
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 2048,
+      system: cbnBuyerPromptContent,
+      messages: [{ role: 'user', content: itemJson }]
+    });
+
+    await trackCost(threadId, response.usage);
+    const buyerResponse = response.content[0].text;
+    console.log(`[BUYERS] Received response (${response.usage.input_tokens} input, ${response.usage.output_tokens} output tokens)`);
+
+    // Parse JSON response
+    const jsonMatch = buyerResponse.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Buyer response did not contain valid JSON');
+    }
+
+    const buyerData = JSON.parse(jsonMatch[0]);
+    console.log(`[BUYERS] Parsed ${buyerData.buyers?.length || 0} buyers`);
+
+    // Get independent price appraisals for each buyer (3 separate pricing calls)
+    const itemForPricing = JSON.stringify([{
+      name: item.name,
+      rarity: item.rarity,
+      properties: item.properties,
+      complication: item.complication
+    }]);
+
+    for (const buyer of buyerData.buyers) {
+      const priceResponse = await anthropic.messages.create({
+        model: 'claude-haiku-4-5',
+        max_tokens: 256,
+        system: cbnPricingPromptContent,
+        messages: [{ role: 'user', content: itemForPricing }]
+      });
+
+      await trackCost(threadId, priceResponse.usage);
+      const priceText = priceResponse.content[0].text;
+      const priceMatch = priceText.match(/\[[\s\S]*\]/);
+      const appraisedPrice = priceMatch ? JSON.parse(priceMatch[0])[0] : item.base_price_gp;
+
+      buyer.offerGp = appraisedPrice;
+      // Store negotiation limits based on interest level
+      const negotiation = INTEREST_NEGOTIATION[buyer.interestLevel] || INTEREST_NEGOTIATION.medium;
+      buyer.maxOffer = Math.round(appraisedPrice * negotiation.maxIncrease);
+      buyer.walkAwayPrice = Math.round(appraisedPrice * negotiation.walkAwayThreshold);
+
+      console.log(`[BUYERS] ${buyer.name} (${buyer.interestLevel}): ${buyer.offerGp}gp initial, max ${buyer.maxOffer}gp, walks at ${buyer.walkAwayPrice}gp`);
+    }
+
+    console.log('=== BUYER GENERATION COMPLETE ===\n');
+    return buyerData;
+
+  } catch (error) {
+    console.error('=== BUYER GENERATION ERROR ===');
+    console.error('[BUYERS] Error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Format a buyer as markdown for display
+ * @param {Object} buyer - Buyer object with calculated offerGp
+ * @param {number} index - Buyer index (0-2)
+ * @returns {string} Formatted markdown
+ */
+function formatBuyerAsMarkdown(buyer, index) {
+  let markdown = `### ${buyer.name}, ${buyer.title}\n`;
+  markdown += `*Prospective Buyer*\n\n`;
+  markdown += `${buyer.description}\n\n`;
+  markdown += `**Interest:** "${buyer.motivation}"\n\n`;
+  markdown += `**Offer: ${buyer.offerGp.toLocaleString()} gp**`;
+  if (buyer.negotiable) {
+    markdown += ` *(negotiable)*`;
+  }
+  markdown += `\n\n---`;
+  return markdown;
+}
+
+/**
+ * Parse item data from a Discord message in inventory thread
+ * Items are posted in a specific markdown format by formatItemAsMarkdown
+ * @param {string} content - Message content
+ * @returns {Object|null} Parsed item data or null if not an item message
+ */
+function parseItemFromMessage(content) {
+  // Item messages start with ### Item Name
+  const nameMatch = content.match(/^### (.+?)$/m);
+  if (!nameMatch) return null;
+
+  const name = nameMatch[1];
+
+  // Parse rarity and type from the italicized line
+  const typeMatch = content.match(/^\*(.+?), (.+?) \(.*?\)\*$/m);
+  const itemType = typeMatch ? typeMatch[1] : 'Unknown';
+  const rarity = typeMatch ? typeMatch[2] : 'unknown';
+
+  // Parse price (either "Price: X gp" or "Purchased for: X gp")
+  const priceMatch = content.match(/\*\*(?:Price|Purchased for):\s*([\d,]+)\s*gp\*\*/);
+  const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, ''), 10) : 0;
+
+  return { name, itemType, rarity, price };
+}
+
+/**
+ * Clean up a sell thread - remove moneybag reactions and lock
+ * @param {Object} session - Sell session
+ * @param {Object} channel - Discord channel
+ */
+async function cleanupSellThread(session, channel) {
+  // Remove all moneybag reactions from buyer messages and current offer
+  for (const buyer of session.buyers) {
+    if (buyer.messageId) {
+      try {
+        const buyerMsg = await channel.messages.fetch(buyer.messageId);
+        await buyerMsg.reactions.cache.get('\u{1F4B0}')?.remove();
+      } catch (e) {
+        // Message may not exist
+      }
+    }
+  }
+  if (session.currentOffer?.messageId) {
+    try {
+      const offerMsg = await channel.messages.fetch(session.currentOffer.messageId);
+      await offerMsg.reactions.cache.get('\u{1F4B0}')?.remove();
+    } catch (e) {
+      // Message may not exist
+    }
+  }
+
+  // Lock the thread so player can read but not continue
+  try {
+    await channel.setLocked(true);
+    console.log(`[SELL] Locked thread ${channel.id}`);
+  } catch (e) {
+    console.warn('[SELL] Could not lock thread:', e.message);
+  }
+
+  // Clean up session
+  delete cbnSessions[channel.id];
+  await saveSessions();
+}
+
+/**
+ * @param {Object} session - Sell session
+ * @param {number} amount - Sale amount in gp
+ * @param {Object} channel - Discord channel to send messages
+ * @param {Object} guild - Discord guild for fetching inventory thread
+ */
+async function completeSale(session, amount, channel, guild) {
+  console.log(`[SELL] Completing sale of ${session.itemBeingSold.name} for ${amount}gp`);
+
+  const player = Player.getByDiscordId(session.playerId);
+  if (!player) {
+    throw new Error('Player not found');
+  }
+
+  // Remove item from inventory
+  Item.removeFromInventory(session.itemBeingSold.inventoryId, player.player_id);
+
+  // Add gold to player
+  Player.addGold(player.player_id, amount);
+
+  // Get updated player balance
+  const updatedPlayer = Player.getById(player.player_id);
+  console.log(`[SELL] Player ${player.username} now has ${updatedPlayer.account_balance_gp}gp`);
+
+  // Update inventory header
+  const invThread = InventoryThread.getByPlayerId(player.player_id);
+  if (invThread) {
+    try {
+      const inventoryChannel = await guild.channels.fetch(invThread.discord_thread_id);
+      const headerMessage = await inventoryChannel.messages.fetch(invThread.header_message_id);
+
+      const headerTemplate = await fs.readFile(
+        path.join(__dirname, 'templates', 'inventory_header.md'),
+        'utf-8'
+      );
+
+      const inventory = Item.getPlayerInventory(player.player_id, true, false);
+      const totalValue = inventory.reduce((sum, i) => sum + (i.purchase_price_gp || 0), 0);
+
+      const updatedHeader = headerTemplate
+        .replace('{balance}', updatedPlayer.account_balance_gp)
+        .replace('{count}', inventory.length)
+        .replace('{value}', totalValue);
+
+      await headerMessage.edit(updatedHeader);
+      console.log(`[SELL] Updated inventory header`);
+
+      // Delete the item message from inventory thread
+      // We need to find and delete the message containing this item
+      // For now, we'll leave this as a TODO - the item is removed from DB but message stays
+      // The user can run !bootstrap to refresh if needed
+
+    } catch (error) {
+      console.error('[SELL] Error updating inventory:', error);
+    }
+  }
+
+  // Send confirmation
+  await channel.send(`**Sale Complete!** Sold **${session.itemBeingSold.name}** for **${amount.toLocaleString()} gp**.\n\n*Your new balance: ${updatedPlayer.account_balance_gp.toLocaleString()} gp*`);
+
+  // Clean up thread (remove reactions, lock, clear session)
+  await cleanupSellThread(session, channel);
+}
+
+/**
+ * Classify if a player message contains a price offer
+ * @param {string} messageContent - Player's message
+ * @param {string} threadId - Thread ID for cost tracking
+ * @returns {Promise<{isOffer: boolean, amount: number|null}>}
+ */
+async function classifyOffer(messageContent, threadId) {
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 100,
+      system: cbnOfferClassifierContent,
+      messages: [{ role: 'user', content: messageContent }]
+    });
+
+    await trackCost(threadId, response.usage);
+
+    const text = response.content[0].text;
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    return { isOffer: false, amount: null };
+  } catch (error) {
+    console.error('[NEGOTIATE] Error classifying offer:', error);
+    return { isOffer: false, amount: null };
+  }
+}
+
+/**
+ * Get buyer response during negotiation
+ * @param {Object} session - Sell session
+ * @param {string} playerMessage - Player's message
+ * @param {string} threadId - Thread ID for cost tracking
+ * @returns {Promise<Object>} Buyer's response with potential new offer
+ */
+async function getBuyerResponse(session, playerMessage, threadId) {
+  const buyer = session.buyers[session.activeBuyer];
+  const item = session.itemBeingSold;
+
+  // Use pre-calculated negotiation limits from buyer generation
+  // maxOffer: highest they'll go based on interest level
+  // walkAwayPrice: if player demands this much, they leave
+  const maxBudget = buyer.maxOffer || Math.round(buyer.offerGp * 1.15);
+  const walkAwayPrice = buyer.walkAwayPrice || Math.round(buyer.offerGp * 1.5);
+
+  // Build context for the negotiation
+  const context = `
+## Buyer Context
+Name: ${buyer.name}
+Title: ${buyer.title}
+Personality: ${buyer.description}
+Motivation: ${buyer.motivation}
+Interest Level: ${buyer.interestLevel} (affects patience and flexibility)
+
+## Item Being Sold
+Name: ${item.name}
+Rarity: ${item.itemData.rarity}
+Properties: ${item.itemData.properties}
+Complication: ${item.itemData.complication}
+History: ${item.itemData.history}
+
+## Negotiation State
+Initial offer: ${buyer.offerGp} gp
+Maximum budget: ${maxBudget} gp (the absolute highest you'll go)
+Walk away threshold: ${walkAwayPrice} gp (if player demands more than this, leave)
+Current offer: ${session.currentOffer?.amount || buyer.offerGp} gp
+
+## Conversation History
+${session.messages.map(m => `${m.role}: ${m.content}`).join('\n')}
+`;
+
+  // Add player's message to history
+  session.messages.push({ role: 'user', content: playerMessage });
+
+  const response = await anthropic.messages.create({
+    model: 'claude-haiku-4-5',
+    max_tokens: 1024,
+    system: cbnNegotiationPromptContent + '\n\n' + context,
+    messages: [{ role: 'user', content: playerMessage }]
+  });
+
+  await trackCost(threadId, response.usage);
+
+  const text = response.content[0].text;
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+
+  if (jsonMatch) {
+    const result = JSON.parse(jsonMatch[0]);
+    // Add buyer's response to history
+    session.messages.push({ role: 'assistant', content: result.response });
+    return result;
+  }
+
+  // Fallback if JSON parsing fails
+  return {
+    response: text,
+    newOffer: session.currentOffer?.amount || buyer.offerGp,
+    isOffer: false,
+    walkAway: false
+  };
+}
+
 /**
  * Split text into chunks that fit within Discord's message limit.
  * @param {string} text - The text to split
@@ -638,6 +1013,21 @@ async function bootstrapServer(guild, statusMessage) {
   };
 
   await updateStatus('Starting bootstrap process...');
+
+  // Clear ephemeral sessions (sell and search) since bootstrap will wipe their threads
+  const sessionIds = Object.keys(cbnSessions);
+  let clearedSessions = 0;
+  for (const threadId of sessionIds) {
+    const session = cbnSessions[threadId];
+    if (session.sessionType === 'sell' || session.sessionType === 'search') {
+      delete cbnSessions[threadId];
+      clearedSessions++;
+    }
+  }
+  if (clearedSessions > 0) {
+    await saveSessions();
+    console.log(`[BOOTSTRAP] Cleared ${clearedSessions} ephemeral sessions`);
+  }
 
   try {
     const botMember = await guild.members.fetch(client.user.id);
@@ -807,10 +1197,10 @@ async function bootstrapServer(guild, statusMessage) {
             },
             0,
             dbItem.purchase_price_gp
-          ).replace('**Price:', '*Purchased for:');
+          ).replace('**Price:', '*Purchased for:').replace('gp**', 'gp*');
 
           const itemMessage = await thread.send(itemMarkdown);
-          await itemMessage.react('💰');
+          await itemMessage.react('\u{2696}'); // scales - click to sell
           await new Promise(resolve => setTimeout(resolve, 300));
         }
 
@@ -1065,13 +1455,14 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
       // Format item for inventory (same format, but mark as purchased)
       const inventoryItemMarkdown = formatItemAsMarkdown(item, 0, price)
-        .replace('**Price:', '*Purchased for:');
+        .replace('**Price:', '*Purchased for:')
+        .replace('gp**', 'gp*');
 
       // Post item in inventory thread
       const inventoryMessage = await inventoryChannel.send(inventoryItemMarkdown);
 
-      // Add sell reaction to inventory item
-      await inventoryMessage.react('💰');
+      // Add sell reaction to inventory item (scales emoji)
+      await inventoryMessage.react('\u{2696}');
 
       console.log(`[PURCHASE] Posted item to inventory thread`);
 
@@ -1111,13 +1502,288 @@ client.on('messageReactionAdd', async (reaction, user) => {
     }
   }
 
-  // Handle money bag emoji (sell - Phase 2)
-  if (emoji === '💰') {
+  // Handle scales emoji (start selling from inventory)
+  if (emoji === '\u{2696}') {
     try {
-      console.log(`[SELL] User ${user.username} clicked sell emoji on message ${message.id} - feature not yet implemented`);
-      // TODO: Phase 2 - Create sell thread
+      // Only handle in inventory threads
+      if (!message.channel.name?.startsWith('inventory-')) {
+        return;
+      }
+
+      console.log(`[SELL] User ${user.username} clicked sell on item in inventory`);
+
+      // Remove the reaction to acknowledge the click
+      await reaction.users.remove(user.id);
+
+      // Parse item name from message content
+      const parsedItem = parseItemFromMessage(message.content);
+      if (!parsedItem) {
+        console.log('[SELL] Could not parse item from message');
+        await reaction.users.remove(user.id);
+        return;
+      }
+
+      // Get player
+      const player = Player.getByDiscordId(user.id);
+      if (!player) {
+        await message.channel.send('Error: Player not found.');
+        return;
+      }
+
+      // Find item in database by name
+      const inventoryItem = Item.findInventoryByName(player.player_id, parsedItem.name);
+      if (!inventoryItem) {
+        await message.channel.send(`Error: "${parsedItem.name}" not found in your inventory.`);
+        await reaction.users.remove(user.id);
+        return;
+      }
+
+      console.log(`[SELL] Found inventory item: ${inventoryItem.name} (inventory_id: ${inventoryItem.inventory_id})`);
+
+      // Check if there's already a sell session for this item
+      const existingSellSession = Object.values(cbnSessions).find(
+        s => s.sessionType === 'sell' &&
+             s.playerId === user.id &&
+             s.itemBeingSold?.inventoryId === inventoryItem.inventory_id
+      );
+      if (existingSellSession) {
+        console.log('[SELL] Already have a sell session for this item');
+        return;
+      }
+
+      // Create sell thread
+      const itemNameTruncated = parsedItem.name.length > 50
+        ? parsedItem.name.substring(0, 47) + '...'
+        : parsedItem.name;
+      const sellThreadName = `sell-${user.username}-${itemNameTruncated}`;
+
+      // Find the crystal-ball-network channel (same as search threads)
+      const gameChannel = message.guild.channels.cache.find(
+        c => c.name === GAME_CHANNEL_NAME && c.type === ChannelType.GuildText
+      );
+
+      if (!gameChannel) {
+        await message.channel.send('Error: Could not find crystal-ball-network channel.');
+        return;
+      }
+
+      const sellThread = await gameChannel.threads.create({
+        name: sellThreadName,
+        autoArchiveDuration: 60, // 1 hour
+        type: ChannelType.PrivateThread,
+        reason: `Creating sell session for ${user.username} - ${parsedItem.name}`
+      });
+
+      await sellThread.members.add(user.id);
+
+      // Create sell session
+      cbnSessions[sellThread.id] = {
+        playerId: user.id,
+        playerName: user.username,
+        startedAt: new Date().toISOString(),
+        sessionType: 'sell',
+        modelMode: 'haiku',
+        itemBeingSold: {
+          inventoryId: inventoryItem.inventory_id,
+          itemId: inventoryItem.item_id,
+          name: inventoryItem.name,
+          purchasePrice: inventoryItem.purchase_price_gp,
+          itemData: inventoryItem
+        },
+        buyers: [],
+        activeBuyer: null,
+        currentOffer: null,
+        messages: []
+      };
+
+      await saveSessions();
+
+      // Send shimmer message
+      await sellThread.send('*The crystal ball shimmers to life...*');
+
+      // Generate buyers
+      try {
+        const buyerData = await generateBuyers(inventoryItem, sellThread.id);
+
+        // Send Curator's intro message
+        if (buyerData.message) {
+          await sellThread.send(buyerData.message);
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+
+        // Post each buyer with reactions
+        const buyerMessages = [];
+        for (let i = 0; i < buyerData.buyers.length; i++) {
+          const buyer = buyerData.buyers[i];
+          const buyerMarkdown = formatBuyerAsMarkdown(buyer, i);
+          const buyerMsg = await sellThread.send(buyerMarkdown);
+
+          // Add reactions: moneybag to accept, speech bubble to negotiate
+          await buyerMsg.react('\u{1F4B0}'); // moneybag
+          if (buyer.negotiable) {
+            await buyerMsg.react('\u{1F4AC}'); // speech bubble
+          }
+
+          buyer.messageId = buyerMsg.id;
+          buyerMessages.push({ messageId: buyerMsg.id, buyer });
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+
+        // Update session with buyer message IDs
+        cbnSessions[sellThread.id].buyers = buyerData.buyers;
+        await saveSessions();
+
+        // Lock the thread until a buyer is selected
+        await sellThread.setLocked(true);
+
+        console.log(`[SELL] Created sell thread: ${sellThreadName} with ${buyerData.buyers.length} buyers`);
+
+      } catch (error) {
+        console.error('[SELL] Error generating buyers:', error);
+        await sellThread.send('*The crystal ball flickers...*\n\nI apologize, but I could not find any buyers for this item at the moment. Please try again later.');
+      }
+
+    } catch (error) {
+      console.error('[SELL] Error starting sell:', error);
+      await message.channel.send(`Error starting sale: ${error.message}`);
+    }
+  }
+
+  // Handle money bag emoji (accept offer in sell thread)
+  if (emoji === '\u{1F4B0}') {
+    try {
+      const threadId = message.channel.id;
+      const session = cbnSessions[threadId];
+
+      // In sell thread - accepting an offer
+      if (session?.sessionType === 'sell') {
+        // Verify the user clicking is the session owner
+        if (session.playerId !== user.id) {
+          console.log(`[SELL] User ${user.username} is not the session owner`);
+          await reaction.users.remove(user.id);
+          return;
+        }
+
+        console.log(`[SELL] User ${user.username} accepting offer in sell thread`);
+
+        // Find which buyer this message belongs to
+        const buyerIndex = session.buyers.findIndex(b => b.messageId === message.id);
+
+        if (buyerIndex === -1) {
+          // Check if this is the current negotiated offer
+          if (session.currentOffer && session.currentOffer.messageId === message.id) {
+            // Accept the negotiated offer
+            await completeSale(session, session.currentOffer.amount, message.channel, message.guild);
+            return;
+          }
+
+          // This is a stale offer - remove the reaction and ignore
+          console.log('[SELL] Stale offer clicked, removing reaction');
+          await reaction.users.remove(user.id);
+          try {
+            // Also remove the bot's moneybag reaction since it shouldn't be there
+            await message.reactions.cache.get('\u{1F4B0}')?.remove();
+          } catch (e) {
+            // Reaction may already be gone
+          }
+          return;
+        }
+
+        const buyer = session.buyers[buyerIndex];
+        console.log(`[SELL] Accepting offer from ${buyer.name} for ${buyer.offerGp}gp`);
+
+        // Complete the sale
+        await completeSale(session, buyer.offerGp, message.channel, message.guild);
+        return;
+      }
+
     } catch (error) {
       console.error('[SELL] Error:', error);
+      await message.channel.send(`Error processing sale: ${error.message}`);
+    }
+  }
+
+  // Handle speech bubble emoji (start negotiation)
+  if (emoji === '\u{1F4AC}') {
+    try {
+      const threadId = message.channel.id;
+      const session = cbnSessions[threadId];
+
+      if (session?.sessionType !== 'sell') {
+        return; // Not a sell session
+      }
+
+      // Verify the user clicking is the session owner
+      if (session.playerId !== user.id) {
+        console.log(`[SELL] User ${user.username} is not the session owner`);
+        await reaction.users.remove(user.id);
+        return;
+      }
+
+      // Check if negotiation already started
+      if (session.activeBuyer !== null) {
+        console.log('[SELL] Negotiation already in progress');
+        await reaction.users.remove(user.id);
+        return;
+      }
+
+      // Find which buyer this is
+      const buyerIndex = session.buyers.findIndex(b => b.messageId === message.id);
+      if (buyerIndex === -1) {
+        return; // Not a buyer message
+      }
+
+      const buyer = session.buyers[buyerIndex];
+      if (!buyer.negotiable) {
+        await message.channel.send(`*${buyer.name} shakes their head.* "My offer is firm. Take it or leave it."`);
+        await reaction.users.remove(user.id);
+        return;
+      }
+
+      console.log(`[SELL] User ${user.username} starting negotiation with ${buyer.name}`);
+
+      // Lock in this buyer, remove others
+      session.activeBuyer = buyerIndex;
+
+      // Delete other buyer messages
+      for (let i = 0; i < session.buyers.length; i++) {
+        if (i !== buyerIndex) {
+          try {
+            const otherMsg = await message.channel.messages.fetch(session.buyers[i].messageId);
+            await otherMsg.delete();
+          } catch (e) {
+            console.warn(`[SELL] Could not delete buyer message: ${e.message}`);
+          }
+        }
+      }
+
+      // Remove reactions from the selected buyer's message
+      try {
+        await message.reactions.removeAll();
+      } catch (e) {
+        console.warn(`[SELL] Could not remove reactions: ${e.message}`);
+      }
+
+      // Unlock thread for negotiation
+      await message.channel.setLocked(false);
+
+      // Send negotiation start message
+      await message.channel.send(
+        `*${buyer.name} leans forward with interest.*\n\n` +
+        `"So, you want to discuss the price? Very well. My initial offer of **${buyer.offerGp.toLocaleString()} gp** stands, but I'm willing to hear your arguments. What do you think this item is truly worth?"\n\n` +
+        `*You may now negotiate. State your counter-offer or make your case for a higher price.*`
+      );
+
+      // Initialize conversation history for negotiation
+      session.messages = [{
+        role: 'assistant',
+        content: `Initial offer: ${buyer.offerGp} gp. The buyer ${buyer.name} is open to negotiation.`
+      }];
+
+      await saveSessions();
+
+    } catch (error) {
+      console.error('[SELL] Negotiation error:', error);
     }
   }
 });
@@ -1290,6 +1956,72 @@ client.on('messageCreate', async (message) => {
   // !cheap command disabled for compatibility issues
   if (message.content === '!cheap') {
     await message.reply('The !cheap command (GPT-4o-mini) has been disabled due to compatibility issues. Please use !fast (haiku) or !fancy (sonnet) instead.');
+    return;
+  }
+
+  // Handle sell sessions - block all messages until buyer is selected
+  if (session.sessionType === 'sell') {
+    if (session.activeBuyer === null) {
+      // No buyer selected yet - ignore messages
+      console.log(`[SELL] Message ignored - no buyer selected yet`);
+      return;
+    }
+    // Negotiation in progress
+    console.log(`[NEGOTIATE] Player ${session.playerName} sent message in negotiation`);
+
+    await message.channel.sendTyping();
+
+    try {
+      // First, classify if the message contains an offer
+      const offerResult = await classifyOffer(message.content, threadId);
+      console.log(`[NEGOTIATE] Offer classification:`, offerResult);
+
+      // Get buyer's response
+      const buyerResponse = await getBuyerResponse(session, message.content, threadId);
+      console.log(`[NEGOTIATE] Buyer response - offer: ${buyerResponse.newOffer}, walkAway: ${buyerResponse.walkAway}`);
+
+      // Send the buyer's response
+      const responseMsg = await message.channel.send(buyerResponse.response);
+
+      // Handle walk away
+      if (buyerResponse.walkAway) {
+        await message.channel.send(`*${session.buyers[session.activeBuyer].name} turns and walks away, disappearing into the crowd.*\n\n**Negotiation ended.** The buyer is no longer interested.`);
+
+        // Clean up thread (remove reactions, lock, clear session)
+        await cleanupSellThread(session, message.channel);
+        return;
+      }
+
+      // If buyer made a new offer, update session and add sell react
+      if (buyerResponse.isOffer && buyerResponse.newOffer) {
+        // Remove old offer react if exists
+        if (session.currentOffer?.messageId) {
+          try {
+            const oldMsg = await message.channel.messages.fetch(session.currentOffer.messageId);
+            await oldMsg.reactions.cache.get('\u{1F4B0}')?.remove();
+          } catch (e) {
+            // Message may not exist anymore
+          }
+        }
+
+        // Update current offer
+        session.currentOffer = {
+          amount: buyerResponse.newOffer,
+          messageId: responseMsg.id
+        };
+
+        // Add sell react to the new offer
+        await responseMsg.react('\u{1F4B0}');
+        await saveSessions();
+
+        console.log(`[NEGOTIATE] New offer: ${buyerResponse.newOffer}gp on message ${responseMsg.id}`);
+      }
+
+    } catch (error) {
+      console.error('[NEGOTIATE] Error:', error);
+      await message.channel.send('*The buyer looks confused for a moment, then regains composure.* "I... what was I saying? Let me think about that."');
+    }
+
     return;
   }
 

@@ -42,11 +42,6 @@ if (tableCount === 0) {
   console.log(`Database has ${tableCount} tables`);
 }
 
-// Utility function for transactions
-db.transaction = (fn) => {
-  return db.transaction(fn);
-};
-
 // Graceful shutdown
 process.on('exit', () => {
   db.close();

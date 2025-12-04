@@ -62,41 +62,6 @@ class Player {
   }
 
   /**
-   * Update player balance (with transaction)
-   * @param {number} playerId
-   * @param {number} newBalance
-   * @returns {Object} Updated player
-   */
-  static updateBalance(playerId, newBalance) {
-    db.prepare(`
-      UPDATE players
-      SET account_balance_gp = ?,
-          last_active_at = CURRENT_TIMESTAMP
-      WHERE player_id = ?
-    `).run(newBalance, playerId);
-
-    return Player.getById(playerId);
-  }
-
-  /**
-   * Add gold to player account
-   */
-  static addGold(playerId, amount) {
-    const player = Player.getById(playerId);
-    const newBalance = player.account_balance_gp + amount;
-
-    db.prepare(`
-      UPDATE players
-      SET account_balance_gp = account_balance_gp + ?,
-          total_earned_gp = total_earned_gp + ?,
-          last_active_at = CURRENT_TIMESTAMP
-      WHERE player_id = ?
-    `).run(amount, amount, playerId);
-
-    return Player.getById(playerId);
-  }
-
-  /**
    * Deduct gold from player account (with validation)
    */
   static deductGold(playerId, amount) {
@@ -116,57 +81,6 @@ class Player {
     return Player.getById(playerId);
   }
 
-  /**
-   * Get player stats
-   */
-  static getStats(playerId) {
-    const player = Player.getById(playerId);
-
-    const inventoryCount = db.prepare(`
-      SELECT COUNT(*) as count
-      FROM player_inventory
-      WHERE player_id = ? AND sold = 0
-    `).get(playerId).count;
-
-    const transactionCount = db.prepare(`
-      SELECT COUNT(*) as count
-      FROM transactions
-      WHERE player_id = ?
-    `).get(playerId).count;
-
-    return {
-      ...player,
-      inventory_count: inventoryCount,
-      transaction_count: transactionCount
-    };
-  }
-
-  /**
-   * Get all players (admin function)
-   */
-  static getAll() {
-    return db.prepare(`
-      SELECT * FROM players ORDER BY created_at DESC
-    `).all();
-  }
-
-  /**
-   * Get top players by wealth
-   */
-  static getLeaderboard(limit = 10) {
-    return db.prepare(`
-      SELECT
-        player_id,
-        username,
-        account_balance_gp,
-        total_spent_gp,
-        total_earned_gp,
-        (SELECT COUNT(*) FROM player_inventory WHERE player_id = players.player_id AND sold = 0) as item_count
-      FROM players
-      ORDER BY account_balance_gp DESC
-      LIMIT ?
-    `).all(limit);
-  }
 }
 
 module.exports = Player;

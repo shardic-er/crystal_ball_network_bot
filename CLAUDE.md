@@ -61,9 +61,9 @@ CRYSTAL BALL NETWORK (Category)
 6. If search: generates 3-5 items (JSON), each posted as separate message with 🛒
 
 **Purchase:**
-1. User clicks 🛒 → Bot validates balance from DB
-2. If sufficient: `Player.deductGold()` → `Item.create()` → `Item.addToInventory()` → `Transaction.create()`
-3. Delete item from search thread → Repost in inventory with 💰
+1. User clicks cart reaction -> Bot validates balance from DB
+2. If sufficient: `Player.deductGold()` -> `Item.create()` -> `Item.addToInventory()`
+3. Delete item from search thread -> Repost in inventory with moneybag reaction
 4. Edit inventory header with new balance
 
 ### Two-Shot Pricing System
@@ -89,9 +89,9 @@ This separation allows creative generation to use any model while keeping pricin
 - `players` - Discord accounts with `account_balance_gp` (500gp start)
 - `items` - Master catalog of all generated items
 - `player_inventory` - Items owned by players (ignore `equipped` column)
-- `transactions` - Complete audit log of purchases/sales
+- `transactions` - Audit log of purchases/sales (schema exists, not yet used)
 
-**Models:** `src/database/models/` - Player, Item, Transaction, ShoppingSession, InventoryThread
+**Models:** `src/database/models/` - Player, Item, InventoryThread
 
 **Critical:** Balance is ALWAYS fetched fresh from database, never stored in session:
 ```javascript
@@ -113,7 +113,7 @@ const player = Player.getByDiscordId(session.playerId);
 
 ```
 src/
-├── bot.js                       # Main bot (1486 lines)
+├── bot.js                       # Main bot logic
 ├── cbn_system_prompt.md         # Curator personality
 ├── cbn_pricing_prompt.md        # Pricing rules
 ├── item_schema.json             # JSON schema for items
@@ -126,8 +126,6 @@ src/
 │   └── models/
 │       ├── Player.js
 │       ├── Item.js
-│       ├── Transaction.js
-│       ├── ShoppingSession.js
 │       └── InventoryThread.js
 ├── discord_channel_templates/   # Channel content templates
 │   ├── welcome.md
@@ -213,7 +211,7 @@ Items you purchase will appear below this message...
 ## Database Usage Patterns
 
 ```javascript
-const { Player, Item, Transaction } = require('./database/models');
+const { Player, Item, InventoryThread } = require('./database/models');
 
 // On member join
 const player = Player.getOrCreate(discordId, username, 500);
@@ -227,7 +225,6 @@ if (player.account_balance_gp >= price) {
   Player.deductGold(player.player_id, price);
   const item = Item.create(itemData, price);
   Item.addToInventory(item.item_id, player.player_id, price);
-  Transaction.create(player.player_id, 'purchase', -price, item.item_id);
 }
 
 // Get inventory

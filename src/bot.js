@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, AttachmentBuilder, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, Partials } = require('discord.js');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs').promises;
 const path = require('path');
@@ -31,7 +31,6 @@ const CBN_PRICING_PROMPT_PATH = path.join(__dirname, 'cbn_pricing_prompt.md');
 const TEMPLATES_DIR = path.join(__dirname, 'discord_channel_templates');
 const GAME_CHANNEL_NAME = 'crystal-ball-network';
 const ACCOUNTS_CHANNEL_NAME = 'accounts';
-const ALLOWED_COMMANDS = ['!bootstrap', '!cost', '!fast', '!fancy'];
 
 // Model configurations
 const MODEL_CONFIGS = {
@@ -326,6 +325,103 @@ function formatItemAsMarkdown(item, index, price) {
   return markdown;
 }
 
+/**
+ * Handle displaying parsed items or plain text responses to a channel.
+ * Filters items by budget if requested, sends messages, and returns session data.
+ * @param {Object} params
+ * @param {Object} params.channel - Discord channel to send messages to
+ * @param {Object} params.parsed - Parsed response from Claude
+ * @param {string} params.rawResponse - Raw response text
+ * @param {Object} params.player - Player object with account_balance_gp
+ * @param {string} params.threadId - Thread ID for pricing
+ * @returns {Promise<{finalResponse: string, itemsData: Object|null}>}
+ */
+async function displayParsedResponse({ channel, parsed, rawResponse, player, threadId }) {
+  let finalResponse = rawResponse;
+  let itemsData = null;
+
+  if (parsed.type === 'items') {
+    const prices = await addPricingToItems(parsed.items, threadId);
+    const shouldFilterByBudget = parsed.rawJson?.filterByBudget === true;
+
+    let affordableItems = parsed.items;
+    let affordablePrices = prices;
+
+    if (shouldFilterByBudget) {
+      console.log('[FILTER] Budget filtering requested by Claude (filterByBudget: true)');
+      affordableItems = [];
+      affordablePrices = [];
+
+      for (let i = 0; i < parsed.items.length; i++) {
+        if (prices[i] <= player.account_balance_gp) {
+          affordableItems.push(parsed.items[i]);
+          affordablePrices.push(prices[i]);
+        }
+      }
+
+      console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${player.account_balance_gp}gp)`);
+    } else {
+      console.log('[FILTER] No budget filtering - showing all items');
+    }
+
+    if (affordableItems.length === 0) {
+      await channel.send(
+        `*The Curator rubs their temples and sighs.*\n\n` +
+        `"I'm afraid ALL the items I was about to show you exceed your current balance of **${player.account_balance_gp} gp**. ` +
+        `Perhaps try a more... modest search query? Or consider items of common or uncommon rarity within your price range."`
+      );
+      finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the player's ${player.account_balance_gp}gp budget.`;
+    } else {
+      if (parsed.rawJson?.message) {
+        await channel.send(parsed.rawJson.message);
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+
+      if (affordableItems.length < parsed.items.length) {
+        const filtered = parsed.items.length - affordableItems.length;
+        await channel.send(
+          `*The Curator discretely sets aside ${filtered} item${filtered > 1 ? 's' : ''} that exceed${filtered === 1 ? 's' : ''} your current budget...*`
+        );
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+
+      const itemMessages = [];
+      for (let i = 0; i < affordableItems.length; i++) {
+        const item = affordableItems[i];
+        const price = affordablePrices[i];
+        const itemMarkdown = formatItemAsMarkdown(item, i, price);
+        const itemMessage = await channel.send(itemMarkdown);
+        await itemMessage.react('\u{1F6D2}');
+        itemMessages.push({
+          messageId: itemMessage.id,
+          item: { ...item, priceGp: price }
+        });
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      itemsData = {
+        rawJson: parsed.rawJson,
+        items: affordableItems.map((item, index) => ({
+          ...item,
+          priceGp: affordablePrices[index]
+        })),
+        itemMessages: itemMessages
+      };
+
+      finalResponse = parsed.rawJson?.message || `Generated ${affordableItems.length} affordable items (${parsed.items.length - affordableItems.length} filtered)`;
+    }
+  } else {
+    finalResponse = parsed.content;
+    const chunks = splitText(finalResponse);
+    for (const chunk of chunks) {
+      await channel.send(chunk);
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+
+  return { finalResponse, itemsData };
+}
+
 function parseAndFormatResponse(responseText, prices) {
   console.log('[FORMAT] Attempting to parse response as JSON...');
 
@@ -432,39 +528,52 @@ async function addPricingToItems(items, threadId) {
   }
 }
 
-function splitMessage(text, maxLength = 2000) {
+/**
+ * Split text into chunks that fit within Discord's message limit.
+ * @param {string} text - The text to split
+ * @param {Object} options - Split options
+ * @param {number} options.maxLength - Maximum length per chunk (default 2000)
+ * @param {string} options.mode - 'prose' splits on paragraphs/sentences, 'lines' splits on newlines/words
+ */
+function splitText(text, { maxLength = 2000, mode = 'prose' } = {}) {
   if (text.length <= maxLength) {
     return [text];
   }
 
   const chunks = [];
-  const paragraphs = text.split('\n\n');
+  const primaryDelimiter = mode === 'prose' ? '\n\n' : '\n';
+  const primaryParts = text.split(primaryDelimiter);
   let currentChunk = '';
 
-  for (const paragraph of paragraphs) {
-    if ((currentChunk + '\n\n' + paragraph).length > maxLength) {
+  for (const part of primaryParts) {
+    if ((currentChunk + primaryDelimiter + part).length > maxLength) {
       if (currentChunk) {
         chunks.push(currentChunk.trim());
         currentChunk = '';
       }
 
-      if (paragraph.length > maxLength) {
-        const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
-        for (const sentence of sentences) {
-          if ((currentChunk + ' ' + sentence).length > maxLength) {
+      if (part.length > maxLength) {
+        // Split oversized parts: prose uses sentences, lines uses words
+        const subParts = mode === 'prose'
+          ? (part.match(/[^.!?]+[.!?]+/g) || [part])
+          : part.split(' ');
+        const subDelimiter = ' ';
+
+        for (const subPart of subParts) {
+          if ((currentChunk + subDelimiter + subPart).length > maxLength) {
             if (currentChunk) {
               chunks.push(currentChunk.trim());
             }
-            currentChunk = sentence;
+            currentChunk = subPart;
           } else {
-            currentChunk += (currentChunk ? ' ' : '') + sentence;
+            currentChunk += (currentChunk ? subDelimiter : '') + subPart;
           }
         }
       } else {
-        currentChunk = paragraph;
+        currentChunk = part;
       }
     } else {
-      currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
+      currentChunk += (currentChunk ? primaryDelimiter : '') + part;
     }
   }
 
@@ -582,7 +691,7 @@ async function bootstrapServer(guild, statusMessage) {
 
     await updateStatus(`Posting content to #${config.name}...`);
 
-    const chunks = splitContent(config.content);
+    const chunks = splitText(config.content, { mode: 'lines' });
     for (const chunk of chunks) {
       await channel.send(chunk);
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -725,49 +834,6 @@ async function bootstrapServer(guild, statusMessage) {
     await updateStatus(`Bootstrap failed: ${error.message}. Please check bot permissions.`);
     throw error;
   }
-}
-
-function splitContent(content, maxLength = 2000) {
-  if (content.length <= maxLength) {
-    return [content];
-  }
-
-  const chunks = [];
-  const lines = content.split('\n');
-  let currentChunk = '';
-
-  for (const line of lines) {
-    if ((currentChunk + '\n' + line).length > maxLength) {
-      if (currentChunk) {
-        chunks.push(currentChunk.trim());
-        currentChunk = '';
-      }
-
-      if (line.length > maxLength) {
-        const words = line.split(' ');
-        for (const word of words) {
-          if ((currentChunk + ' ' + word).length > maxLength) {
-            if (currentChunk) {
-              chunks.push(currentChunk.trim());
-            }
-            currentChunk = word;
-          } else {
-            currentChunk += (currentChunk ? ' ' : '') + word;
-          }
-        }
-      } else {
-        currentChunk = line;
-      }
-    } else {
-      currentChunk += (currentChunk ? '\n' : '') + line;
-    }
-  }
-
-  if (currentChunk) {
-    chunks.push(currentChunk.trim());
-  }
-
-  return chunks.length > 0 ? chunks : [content.substring(0, maxLength)];
 }
 
 async function showCostInfo(message, threadId) {
@@ -1144,112 +1210,13 @@ client.on('messageCreate', async (message) => {
       // Parse and format response
       const parsed = parseAndFormatResponse(rawResponse, null);
 
-      let finalResponse = rawResponse;
-      let itemsData = null;
-
-      if (parsed.type === 'items') {
-        // Get prices for items
-        const prices = await addPricingToItems(parsed.items, thread.id);
-
-        // Check if Claude requested budget filtering via JSON field
-        const shouldFilterByBudget = parsed.rawJson?.filterByBudget === true;
-
-        // Conditionally filter based on whether Claude requested it
-        let affordableItems = parsed.items;
-        let affordablePrices = prices;
-
-        if (shouldFilterByBudget) {
-          console.log('[FILTER] Budget filtering requested by Claude (filterByBudget: true)');
-          affordableItems = [];
-          affordablePrices = [];
-
-          for (let i = 0; i < parsed.items.length; i++) {
-            if (prices[i] <= player.account_balance_gp) {
-              affordableItems.push(parsed.items[i]);
-              affordablePrices.push(prices[i]);
-            }
-          }
-
-          console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${player.account_balance_gp}gp)`);
-        } else {
-          console.log('[FILTER] No budget filtering - showing all items');
-        }
-
-        // Check if any items remain after filtering
-        if (affordableItems.length === 0) {
-          await thread.send(
-            `*The Curator rubs their temples and sighs.*\n\n` +
-            `"I'm afraid ALL the items I was about to show you exceed your current balance of **${player.account_balance_gp} gp**. ` +
-            `Perhaps try a more... modest search query? Or consider items of common or uncommon rarity within your price range."`
-          );
-
-          // Store a summary for conversation history
-          finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the player's ${player.account_balance_gp}gp budget.`;
-        } else {
-          // Send intro message if present
-          if (parsed.rawJson?.message) {
-            await thread.send(parsed.rawJson.message);
-            await new Promise(resolve => setTimeout(resolve, 300));
-          }
-
-          // Notify if some items were filtered
-          if (affordableItems.length < parsed.items.length) {
-            const filtered = parsed.items.length - affordableItems.length;
-            await thread.send(
-              `*The Curator discretely sets aside ${filtered} item${filtered > 1 ? 's' : ''} that exceed${filtered === 1 ? 's' : ''} your current budget...*`
-            );
-            await new Promise(resolve => setTimeout(resolve, 300));
-          }
-
-          // Send each affordable item as a separate message with shopping cart reaction
-          const itemMessages = [];
-          for (let i = 0; i < affordableItems.length; i++) {
-            const item = affordableItems[i];
-            const price = affordablePrices[i];
-
-            // Format single item as markdown
-            const itemMarkdown = formatItemAsMarkdown(item, i, price);
-
-            // Send item message
-            const itemMessage = await thread.send(itemMarkdown);
-
-            // Add shopping cart reaction
-            await itemMessage.react('🛒');
-
-            // Store message ID for purchase tracking
-            itemMessages.push({
-              messageId: itemMessage.id,
-              item: { ...item, priceGp: price }
-            });
-
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-
-          // Store items data for session
-          itemsData = {
-            rawJson: parsed.rawJson,
-            items: affordableItems.map((item, index) => ({
-              ...item,
-              priceGp: affordablePrices[index]
-            })),
-            itemMessages: itemMessages
-          };
-
-          // Create a summary for conversation history
-          finalResponse = parsed.rawJson?.message || `Generated ${affordableItems.length} affordable items (${parsed.items.length - affordableItems.length} filtered)`;
-        }
-
-      } else {
-        // Plain text response (account queries, etc.)
-        finalResponse = parsed.content;
-
-        // Send plain text response
-        const chunks = splitMessage(finalResponse);
-        for (const chunk of chunks) {
-          await thread.send(chunk);
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-      }
+      const { finalResponse, itemsData } = await displayParsedResponse({
+        channel: thread,
+        parsed,
+        rawResponse,
+        player,
+        threadId: thread.id
+      });
 
       // Store assistant response
       cbnSessions[thread.id].messages.push({
@@ -1354,118 +1321,19 @@ client.on('messageCreate', async (message) => {
     // Parse and format response
     const parsed = parseAndFormatResponse(rawResponse, null);
 
-    let finalResponse = rawResponse;
-    let itemsData = null;
-
-    if (parsed.type === 'items') {
-      // Get prices for items
-      const prices = await addPricingToItems(parsed.items, threadId);
-
-      // Check if Claude requested budget filtering via JSON field
-      const shouldFilterByBudget = parsed.rawJson?.filterByBudget === true;
-
-      // Conditionally filter based on whether Claude requested it
-      let affordableItems = parsed.items;
-      let affordablePrices = prices;
-
-      if (shouldFilterByBudget) {
-        console.log('[FILTER] Budget filtering requested by Claude (filterByBudget: true)');
-        affordableItems = [];
-        affordablePrices = [];
-
-        for (let i = 0; i < parsed.items.length; i++) {
-          if (prices[i] <= player.account_balance_gp) {
-            affordableItems.push(parsed.items[i]);
-            affordablePrices.push(prices[i]);
-          }
-        }
-
-        console.log(`[FILTER] Filtered ${parsed.items.length} items to ${affordableItems.length} affordable items (budget: ${player.account_balance_gp}gp)`);
-      } else {
-        console.log('[FILTER] No budget filtering - showing all items');
-      }
-
-      // Check if any items remain after filtering
-      if (affordableItems.length === 0) {
-        await message.channel.send(
-          `*The Curator rubs their temples and sighs.*\n\n` +
-          `"I'm afraid ALL the items I was about to show you exceed your current balance of **${player.account_balance_gp} gp**. ` +
-          `Perhaps try a more... modest search query? Or consider items of common or uncommon rarity within your price range."`
-        );
-
-        // Store a summary for conversation history
-        finalResponse = `Generated ${parsed.items.length} items, but all were too expensive for the player's ${player.account_balance_gp}gp budget.`;
-      } else {
-        // Send intro message if present
-        if (parsed.rawJson?.message) {
-          await message.channel.send(parsed.rawJson.message);
-          await new Promise(resolve => setTimeout(resolve, 300));
-        }
-
-        // Notify if some items were filtered
-        if (affordableItems.length < parsed.items.length) {
-          const filtered = parsed.items.length - affordableItems.length;
-          await message.channel.send(
-            `*The Curator discretely sets aside ${filtered} item${filtered > 1 ? 's' : ''} that exceed${filtered === 1 ? 's' : ''} your current budget...*`
-          );
-          await new Promise(resolve => setTimeout(resolve, 300));
-        }
-
-        // Send each affordable item as a separate message with shopping cart reaction
-        const itemMessages = [];
-        for (let i = 0; i < affordableItems.length; i++) {
-          const item = affordableItems[i];
-          const price = affordablePrices[i];
-
-          // Format single item as markdown
-          const itemMarkdown = formatItemAsMarkdown(item, i, price);
-
-          // Send item message
-          const itemMessage = await message.channel.send(itemMarkdown);
-
-          // Add shopping cart reaction
-          await itemMessage.react('🛒');
-
-          // Store message ID for purchase tracking
-          itemMessages.push({
-            messageId: itemMessage.id,
-            item: { ...item, priceGp: price }
-          });
-
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-
-        // Store items data for session
-        itemsData = {
-          rawJson: parsed.rawJson,
-          items: affordableItems.map((item, index) => ({
-            ...item,
-            priceGp: affordablePrices[index]
-          })),
-          itemMessages: itemMessages  // Track which messages have which items
-        };
-
-        // Create a summary for conversation history
-        finalResponse = parsed.rawJson?.message || `Generated ${affordableItems.length} affordable items (${parsed.items.length - affordableItems.length} filtered)`;
-      }
-
-    } else {
-      // Plain text response (account queries, etc.)
-      finalResponse = parsed.content;
-
-      // Send plain text response
-      const chunks = splitMessage(finalResponse);
-      for (const chunk of chunks) {
-        await message.channel.send(chunk);
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-    }
+    const { finalResponse, itemsData } = await displayParsedResponse({
+      channel: message.channel,
+      parsed,
+      rawResponse,
+      player,
+      threadId
+    });
 
     // Store assistant response (formatted markdown for display)
     session.messages.push({
       role: 'assistant',
       content: finalResponse,
-      itemsData: itemsData  // Store structured data for future database export
+      itemsData: itemsData
     });
 
     await saveSessions();

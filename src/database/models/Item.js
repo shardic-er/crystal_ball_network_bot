@@ -151,15 +151,16 @@ class Item {
    * @param {number} itemId
    * @param {number} playerId
    * @param {number} purchasePrice
+   * @param {string} discordMessageId - ID of the item message in inventory thread
    * @returns {number} inventory_id
    */
-  static addToInventory(itemId, playerId, purchasePrice) {
+  static addToInventory(itemId, playerId, purchasePrice, discordMessageId) {
     const insert = db.prepare(`
-      INSERT INTO player_inventory (player_id, item_id, purchase_price_gp)
-      VALUES (?, ?, ?)
+      INSERT INTO player_inventory (player_id, item_id, purchase_price_gp, discord_message_id)
+      VALUES (?, ?, ?, ?)
     `);
 
-    const result = insert.run(playerId, itemId, purchasePrice);
+    const result = insert.run(playerId, itemId, purchasePrice, discordMessageId);
 
     console.log(`[DB] Added item ${itemId} to player ${playerId} inventory (inventory_id: ${result.lastInsertRowid})`);
 
@@ -206,6 +207,24 @@ class Item {
       JOIN items ON inv.item_id = items.item_id
       WHERE inv.inventory_id = ?
     `).get(inventoryId);
+  }
+
+  /**
+   * Get inventory item by Discord message ID
+   * @param {string} discordMessageId - Discord message ID
+   * @returns {Object|null} Inventory item with joined item data
+   */
+  static getByMessageId(discordMessageId) {
+    return db.prepare(`
+      SELECT
+        inv.*,
+        items.*,
+        inv.purchase_price_gp as paid_price,
+        items.base_price_gp as catalog_price
+      FROM player_inventory inv
+      JOIN items ON inv.item_id = items.item_id
+      WHERE inv.discord_message_id = ?
+    `).get(discordMessageId);
   }
 
   /**

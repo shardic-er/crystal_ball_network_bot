@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS player_inventory (
   player_id INTEGER NOT NULL,
   item_id INTEGER NOT NULL,
   purchase_price_gp INTEGER NOT NULL,
+  discord_message_id TEXT NOT NULL,
   purchased_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   equipped BOOLEAN DEFAULT 0,
   sold BOOLEAN DEFAULT 0,

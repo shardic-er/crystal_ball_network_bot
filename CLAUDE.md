@@ -4,7 +4,7 @@ Technical reference for Claude Code and developers working on the Crystal Ball N
 
 ## Project Overview
 
-A **diegetic magic item collection game** where players interact with "The Curator" - an AI-powered interdimensional merchant. Players browse AI-generated D&D items, purchase with emoji reactions (🛒), and build persistent inventories.
+A **diegetic magic item collection game** where players interact with the Crystal Ball Network (CBN) - a magical marketplace interface operated by the White Tower Banking Company. Players browse AI-generated D&D items, purchase with emoji reactions, and build persistent inventories.
 
 **Phase 1 Complete:** Seamless search, reaction-based purchasing, persistent inventory, balance-aware personality.
 
@@ -20,11 +20,7 @@ npm start          # Production mode
 
 **Key files:**
 - `src/bot.js` - Main bot logic
-- `src/cbn_system_prompt.md` - The Curator's personality (editable without restart)
-- `src/cbn_pricing_prompt.md` - Pricing framework (editable without restart)
-- `src/cbn_buyer_prompt.md` - Buyer generation for selling (editable without restart)
-- `src/cbn_negotiation_prompt.md` - Buyer negotiation personality (editable without restart)
-- `src/cbn_offer_classifier_prompt.md` - Price offer detection (editable without restart)
+- `src/prompts/` - AI prompt files (editable without restart)
 - `src/database/` - SQLite database with models
 
 ## Architecture Patterns
@@ -47,7 +43,7 @@ CRYSTAL BALL NETWORK (Category)
 1. **One item per message** - Each item is a separate Discord message with cart reaction
 2. **Diegetic immersion** - All interactions stay in-character
 3. **Emoji-driven** - React cart to buy, scales to sell, speech bubble to negotiate, moneybag to accept offer
-4. **Balance-aware personality** - Curator's tone scales with player wealth (obsequious to rude)
+4. **Balance-aware personality** - CBN's tone scales with player wealth (obsequious to rude)
 5. **Fixed 500gp start** - All players begin with same balance
 6. **Database-driven** - Balance always fetched fresh from DB, never cached
 
@@ -94,11 +90,11 @@ Item generation is split into two API calls to optimize costs:
 
 1. **Generation** (Haiku by default for searches): Creates items without prices
    - Returns JSON with `name`, `itemType`, `rarity`, `description`, `history`, `properties`, `complication`
-   - Uses `src/cbn_system_prompt.md` for personality and item generation rules
+   - Uses `src/prompts/cbn_system_prompt.md` for personality and item generation rules
 
-2. **Pricing** (Always Haiku): Adds prices based on D&D 5e framework
+2. **Pricing** (Always Haiku with extended thinking): Adds prices based on D&D 5e framework
    - Takes generated items JSON, returns same structure with `priceGp` added
-   - Uses `src/cbn_pricing_prompt.md` for pricing rules
+   - Uses `src/prompts/cbn_pricing_prompt.md` for pricing rules
    - Applies discounts for complications
 
 This separation allows creative generation to use any model while keeping pricing fast and cheap.
@@ -149,21 +145,22 @@ const player = Player.getByDiscordId(session.playerId);
 ```
 src/
 ├── bot.js                       # Main bot logic
-├── cbn_system_prompt.md         # Curator personality
-├── cbn_pricing_prompt.md        # Pricing rules
-├── cbn_buyer_prompt.md          # Buyer generation for selling
-├── cbn_negotiation_prompt.md    # Buyer negotiation personality
-├── cbn_offer_classifier_prompt.md # Price offer detection
+├── config.json                  # Bot configuration
 ├── item_schema.json             # JSON schema for items
-├── cbn_sessions.json            # Active sessions
-├── cost_tracking.json           # API costs (auto-generated)
+├── cbn_sessions.json            # Active sessions (runtime)
+├── cost_tracking.json           # API costs (runtime)
+├── prompts/                     # AI prompts (editable without restart)
+│   ├── cbn_system_prompt.md     # CBN personality and item generation
+│   ├── cbn_pricing_prompt.md    # Pricing rules
+│   ├── cbn_buyer_prompt.md      # Buyer generation
+│   ├── cbn_negotiation_prompt.md # Negotiation personality
+│   └── cbn_offer_classifier_prompt.md # Price detection
 ├── database/
 │   ├── db.js                    # SQLite connection (WAL mode)
 │   ├── schema.sql               # Auto-executed on first run
-│   ├── README.md                # Database docs
 │   └── models/
-│       ├── Player.js            # Player balance management
-│       ├── Item.js              # Item and inventory management
+│       ├── Player.js
+│       ├── Item.js
 │       └── InventoryThread.js
 ├── discord_channel_templates/   # Channel content templates
 │   ├── welcome.md
@@ -278,17 +275,11 @@ const items = Item.getPlayerInventory(playerId, true, false);
 
 ## Modifying Behavior
 
-**Curator personality:** Edit `src/cbn_system_prompt.md` (takes effect immediately, no restart)
-
-**Pricing logic:** Edit `src/cbn_pricing_prompt.md` (takes effect immediately, no restart)
-
-**Buyer generation:** Edit `src/cbn_buyer_prompt.md` (takes effect immediately, no restart)
-
-**Negotiation style:** Edit `src/cbn_negotiation_prompt.md` (takes effect immediately, no restart)
+**AI prompts:** Edit files in `src/prompts/` (takes effect immediately, no restart)
 
 **Database schema:** Edit `src/database/schema.sql` then delete `data/cbn.db` to recreate
 
-**Balance tiers:** Edit personality thresholds in `src/cbn_system_prompt.md`
+**Bot config:** Edit `src/config.json` (requires restart)
 
 ## Development Priorities
 
@@ -323,5 +314,5 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for complete roadmap.
 
 - [README.md](README.md) - User guide and setup instructions
 - [docs/ROADMAP.md](docs/ROADMAP.md) - Development phases
-- [docs/UI_IMPROVEMENTS.md](docs/UI_IMPROVEMENTS.md) - UI/UX planning
+- [docs/DESIGN_PATTERNS.md](docs/DESIGN_PATTERNS.md) - Current UI patterns and interaction flows
 - [src/database/README.md](src/database/README.md) - Complete database documentation

@@ -206,36 +206,191 @@ Instead of auto-soliciting random buyers, players can approach a known NPC with 
 
 **Goal:** Send NPC adventurers on quests for profit and loot
 
-### 4.1 Quest Board UI
-- [ ] Design quest board channel/thread structure
-- [ ] Quests appear with stated rewards ("10,000 gp on success")
-- [ ] Hidden rewards possible ("killing the cube, Aldrich finds an item")
-- [ ] Quest difficulty ratings
+### 4.1 Channel Structure
 
-### 4.2 Adventurer NPCs
-- [ ] Adventurer archetype for NPCs
-- [ ] Track adventurer "inventory" (items you've given/sold them)
-- [ ] Adventurer stats/capabilities affect quest success
-- [ ] Party composition for harder quests
+```
+CRYSTAL BALL NETWORK (Category)
++-- #welcome
++-- #crystal-ball-network
++-- #accounts
++-- #quest-board              <-- NEW: Quest listings and party assembly
++-- Private Threads:
+    +-- quest-[username]-[questslug]  <-- NEW: Active quest narratives
+```
 
-### 4.3 Quest Execution
-- [ ] Quest "story" thread - simulation using D&D 5e rules
-- [ ] AI narrates the adventure scene-by-scene
-- [ ] Success/failure based on party gear and dice
-- [ ] Loot generation on success
-- [ ] Medical bills on failure (or death?)
+### 4.2 Quest Board
+- [ ] #quest-board channel shows available quests
+- [ ] Each quest displays: name, description, base gold reward, turn limit
+- [ ] Player reacts to accept a quest
+- [ ] Bot prompts for party assembly (select adventurer NPCs)
+- [ ] Creates quest thread once party is confirmed
 
-### 4.4 Adventurer Relationships
-- [ ] Talk with adventurers between quests
-- [ ] Build trust and loyalty
-- [ ] Risk of adventurer death on failed quests?
-- [ ] Equip adventurers from your inventory
+### 4.3 Adventurer NPCs & Equipment
+- [ ] Adventurer archetype for NPCs (from Phase 2)
+- [ ] Each adventurer tracks 3 "attuned" items (last 3 items sold to them)
+- [ ] Attuned items appear in quest context, affect available options
+- [ ] Items are key - narrator highlights when items enable solutions
+- [ ] Payment model: TBD (flat fee, loot cut, trust-based, post-quest settlement)
 
-### 4.5 Economy Balance
+### 4.4 Quest Execution
+
+**Turn-Based Narrative:**
+- Each turn = one message in the thread (caps context length naturally)
+- Narrator shows `[Turn X of Y remaining]` in each message
+- Player types free-form input OR sends party autonomously (gets summary at end)
+- Combat abstracted: "The party engages - Harwick's Flame Tongue proves decisive. 2 turns consumed, minor injuries."
+- Items matter more than stats for resolution
+
+**Quest Thread State (survives restarts):**
+- All state stored in database
+- Bootstrap can regenerate thread from DB
+- Regenerate react emoji on first message to rebuild thread if needed
+- Abandoned quests auto-fail after timeout (24h?)
+
+### 4.5 Quest File Structure
+
+```markdown
+# Quest Name
+
+## Metadata
+- turn_limit: 10
+- base_reward: 75
+
+## Description
+[Posted on quest board - the hook for players]
+
+## Library
+[World bible - setting, NPCs, locations, tone]
+[Always in narrator context]
+[MUST specify to highlight when party items are relevant]
+
+## Scenes
+[Structured encounter flow for AI reference]
+
+## Resolution Conditions
+[What triggers success/partial/failure]
+
+## Loot Table
+[Possible items with conditions for earning them]
+```
+
+### 4.6 Death & Injury
+- [ ] AI determines if adventurers are downed (0 HP) during quest
+- [ ] Downed NPCs are disabled post-quest
+- [ ] Player pays healing cost (react emoji) to restore them
+- [ ] If not healed, NPC remains disabled (can't shop, can't quest)
+- [ ] Permanent death possible for catastrophic failures?
+
+### 4.7 Teardown Pipeline
+
+When quest ends (resolution or turn limit reached), a multi-step pipeline processes the results:
+
+**Step 1: Teardown Analysis** (`quest_teardown_prompt.md`)
+- Input: Full quest transcript + quest metadata + party composition
+- Determines: outcome (success/partial/failure)
+- Outputs structured summary:
+  ```
+  **Quest Complete: [Quest Name]**
+  **Outcome: [success/partial/failure]**
+
+  **Gold Earned:**
+  Base reward: X gp
+  [Bonus condition]: Y gp
+  **Total: Z gp**
+
+  **Loot Obtained:**
+  - [Item 1 name]
+  - [Item 2 name]
+
+  **Party Status:**
+  - [NPC 1]: Fine
+  - [NPC 2]: Injured (300 gp to heal), Item Lost (Flame Tongue)
+
+  **Reputation Impact:**
+  - [Event] (+1 Good / -1 Lawful / etc.)
+  ```
+
+**NPC Status Conditions:**
+- Fine: No issues
+- Injured: Requires healing gold (100-500 gp)
+- Dead: Requires resurrection (1000+ gp)
+- Item Lost: Attuned item destroyed/consumed (specify which)
+- Shaken: Psychological trauma, requires intervention before next quest
+
+**Step 2: Loot Generation** (`quest_loot_generator_prompt.md`, called per item)
+- Input: Full transcript + teardown summary + "Generate stat block for: [Item Name]"
+- Output: Full item JSON with quest-flavored history/complications
+- Authoritative: Does NOT refuse or nerf items - quest rewards are earned
+- More permissive than shop generator on power level
+
+**Step 3: System Processing**
+- Parse teardown summary
+- Call loot generator for each item obtained
+- Add generated items to player inventory
+- Credit gold to player balance
+- Update NPC status (disabled, disabled_reason)
+- Apply alignment/reputation changes
+- Mark quest as "cleared" if first completion
+- Post summary to Discord, log to console
+
+### 4.8 Database Schema
+
+```sql
+CREATE TABLE quests (
+  quest_id INTEGER PRIMARY KEY,
+  slug TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  turn_limit INTEGER DEFAULT 10,
+  base_gold_reward INTEGER,
+  quest_file_path TEXT
+);
+
+CREATE TABLE quest_runs (
+  run_id INTEGER PRIMARY KEY,
+  player_id INTEGER NOT NULL,
+  quest_id INTEGER NOT NULL,
+  discord_thread_id TEXT NOT NULL,
+  turns_remaining INTEGER NOT NULL,
+  started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  completed_at DATETIME,
+  outcome TEXT,
+  cleared BOOLEAN DEFAULT 0,
+  FOREIGN KEY (player_id) REFERENCES players(player_id),
+  FOREIGN KEY (quest_id) REFERENCES quests(quest_id)
+);
+
+CREATE TABLE quest_party (
+  run_id INTEGER NOT NULL,
+  npc_id INTEGER NOT NULL,
+  status TEXT DEFAULT 'active',  -- 'active', 'downed', 'dead'
+  PRIMARY KEY (run_id, npc_id),
+  FOREIGN KEY (run_id) REFERENCES quest_runs(run_id),
+  FOREIGN KEY (npc_id) REFERENCES npcs(npc_id)
+);
+
+CREATE TABLE quest_messages (
+  message_id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL,
+  discord_message_id TEXT NOT NULL,
+  turn_number INTEGER NOT NULL,
+  role TEXT NOT NULL,             -- 'narrator', 'player'
+  content TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (run_id) REFERENCES quest_runs(run_id)
+);
+
+-- Add to npcs table (from Phase 2)
+ALTER TABLE npcs ADD COLUMN disabled BOOLEAN DEFAULT 0;
+ALTER TABLE npcs ADD COLUMN disabled_reason TEXT;
+```
+
+### 4.9 Economy Balance
 - [ ] Questing should be slightly more profitable than item flipping
-- [ ] But more complex and risky
-- [ ] Creates demand for specific items (adventurer gear)
-- [ ] Loot provides items you can't buy
+- [ ] But more complex and risky (adventurer injury costs)
+- [ ] Creates demand for specific items (gear for adventurers)
+- [ ] Loot provides items you can't buy through normal shopping
+- [ ] Quests are replayable but "cleared" status tracked
 
 ---
 
@@ -286,11 +441,10 @@ Instead of auto-soliciting random buyers, players can approach a known NPC with 
 ## Open Design Questions
 
 1. **Pitch UI:** How to cross-reference contacts with inventory? Two-step selection, pitch button, or conversation-driven?
-2. **Quest UI:** How to display quest board? Separate channel? Thread per quest?
-3. **Party Composition:** How many adventurers per quest? Player choice or auto-assigned?
-4. **Death Mechanics:** Can adventurers die permanently? Resurrection costs?
-5. **Alignment Effects:** What concrete gameplay effects does alignment have beyond NPC selection?
-6. **Crafting Criteria:** How specific should material requirements be? Exact items or categories?
+2. **Adventurer Payment:** How do adventurers get paid for quests? Flat fee, loot cut, trust-based, or post-quest settlement?
+3. **Alignment Effects:** What concrete gameplay effects does alignment have beyond NPC selection?
+4. **Crafting Criteria:** How specific should material requirements be? Exact items or categories?
+5. **Permanent Death:** Should catastrophic quest failures result in permanent NPC death, or just extended disability?
 
 ---
 
@@ -304,5 +458,5 @@ Instead of auto-soliciting random buyers, players can approach a known NPC with 
 
 ---
 
-**Last Updated:** 2025-12-05
+**Last Updated:** 2025-12-11
 **Current Phase:** Phase 1 - Performance & Polish

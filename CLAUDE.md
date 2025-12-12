@@ -92,12 +92,12 @@ Item generation is split into two API calls to optimize costs:
    - Returns JSON with `name`, `itemType`, `rarity`, `description`, `history`, `properties`, `complication`
    - Uses `src/prompts/cbn_system_prompt.md` for personality and item generation rules
 
-2. **Pricing** (Always Haiku with extended thinking): Adds prices based on D&D 5e framework
+2. **Pricing** (Always Sonnet without extended thinking): Adds prices based on D&D 5e framework
    - Takes generated items JSON, returns same structure with `priceGp` added
    - Uses `src/prompts/cbn_pricing_prompt.md` for pricing rules
    - Applies discounts for complications
 
-This separation allows creative generation to use any model while keeping pricing fast and cheap.
+This separation allows creative generation to use any model while keeping pricing accurate. Sonnet without extended thinking achieves accurate D&D 5e pricing in ~3s (vs ~24s for Haiku with extended thinking).
 
 ### Selling System Pricing
 

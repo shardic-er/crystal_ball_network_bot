@@ -98,6 +98,22 @@ if (!COST_CONFIG) {
 // Utility: delay helper to reduce boilerplate
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Timing utility for performance profiling
+const timings = {};
+function startTiming(label) {
+  timings[label] = Date.now();
+}
+function endTiming(label) {
+  if (!timings[label]) {
+    console.log(`[TIMING] WARNING: No start time for "${label}"`);
+    return 0;
+  }
+  const elapsed = Date.now() - timings[label];
+  console.log(`[TIMING] ${label}: ${elapsed}ms`);
+  delete timings[label];
+  return elapsed;
+}
+
 // Utility: load and populate inventory header template
 const INVENTORY_HEADER_PATH = path.join(__dirname, 'templates', 'inventory_header.md');
 async function getInventoryHeader(balance, itemCount, totalValue) {
@@ -519,18 +535,14 @@ async function displayParsedResponse({ channel, parsed, rawResponse, player, thr
 }
 
 function parseAndFormatResponse(responseText) {
-  console.log('[FORMAT] Attempting to parse response as JSON...');
-
-  // Try to extract JSON from response
+-  // Try to extract JSON from response
   const jsonMatch = responseText.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
-    console.log('[FORMAT] No JSON found in response, treating as plain text');
     return { type: 'plain', content: responseText, items: [] };
   }
 
   try {
     const data = JSON.parse(jsonMatch[0]);
-    console.log(`[FORMAT] Successfully parsed JSON with ${data.items?.length || 0} items`);
 
     if (!data.items || data.items.length === 0) {
       // Non-item response (account query, etc.)
@@ -547,7 +559,6 @@ function parseAndFormatResponse(responseText) {
 
   } catch (error) {
     console.error('[FORMAT] JSON parsing failed:', error);
-    console.log('[FORMAT] Falling back to plain text');
     return { type: 'plain', content: responseText, items: [] };
   }
 }
@@ -558,8 +569,7 @@ async function addPricingToItems(items, threadId, maxRetries = 3) {
     return [];
   }
 
-  console.log('=== PRICING SYSTEM START ===');
-  console.log(`[PRICING] Pricing ${items.length} items`);
+  startTiming('pricing-api-call');
 
   const session = cbnSessions[threadId];
   const playerModelMode = session?.modelMode || MODEL_MODE;
@@ -567,30 +577,20 @@ async function addPricingToItems(items, threadId, maxRetries = 3) {
 
   // Convert items to JSON string for pricing
   const itemsForPricing = JSON.stringify(items, null, 2);
-  console.log(`[PRICING] Sending ${itemsForPricing.length} characters to pricing model`);
 
   let lastError = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await anthropic.messages.create({
-        model: 'claude-haiku-4-5',
+        model: 'claude-sonnet-4-5',
         max_tokens: 4096,
-        thinking: {
-          type: 'enabled',
-          budget_tokens: 2048
-        },
         system: cbnPricingPromptContent,
         messages: [{ role: 'user', content: itemsForPricing }]
       });
 
       await trackCost(threadId, response.usage);
-      // Find the text block (thinking block comes first, then text)
-      const textBlock = response.content.find(block => block.type === 'text');
-      const pricingResponse = textBlock?.text || '';
-      console.log(`[PRICING] Received response (${response.usage.input_tokens} input tokens, ${response.usage.output_tokens} output tokens)`);
-
-      console.log(`[PRICING] Raw pricing response:\n${pricingResponse}`);
+      const pricingResponse = response.content[0]?.text || '';
 
       // Parse JSON array of prices
       const jsonMatch = pricingResponse.match(/\[[\s\S]*\]/);
@@ -599,13 +599,12 @@ async function addPricingToItems(items, threadId, maxRetries = 3) {
       }
 
       const prices = JSON.parse(jsonMatch[0]);
-      console.log(`[PRICING] Parsed ${prices.length} prices:`, prices);
 
       if (prices.length !== items.length) {
-        console.warn(`[PRICING] WARNING: Price count (${prices.length}) doesn't match item count (${items.length})`);
+        console.warn(`[PRICING] Price count (${prices.length}) doesn't match item count (${items.length})`);
       }
 
-      console.log('=== PRICING SYSTEM COMPLETE ===\n');
+      endTiming('pricing-api-call');
       return prices;
 
     } catch (error) {
@@ -1829,21 +1828,28 @@ client.on('messageCreate', async (message) => {
 
   // Handle crystal-ball-network channel
   if (message.channel.name === GAME_CHANNEL_NAME && message.channel.type === ChannelType.GuildText) {
+    startTiming('search-total');
     try {
       // Get or create player
+      startTiming('search-db-player');
       const player = Player.getOrCreate(message.author.id, message.author.username, 500);
+      endTiming('search-db-player');
       console.log(`[SEARCH] Player ${player.username} starting search (balance: ${player.account_balance_gp}gp)`);
 
       // Store the user's search query
       const userQuery = message.content;
 
       // Delete the user's message immediately
+      startTiming('search-discord-delete-msg');
       await message.delete();
+      endTiming('search-discord-delete-msg');
 
       // Send immediate confirmation in main channel (will be deleted after thread is created)
+      startTiming('search-discord-send-confirmation');
       const confirmation = await message.channel.send(
         `Opening search portal for ${message.author}...`
       );
+      endTiming('search-discord-send-confirmation');
 
       // Create ephemeral search thread with truncated query
       // Truncate query to fit Discord's 100 character limit for thread names
@@ -1853,15 +1859,19 @@ client.on('messageCreate', async (message) => {
         : userQuery;
       const threadName = `search-${message.author.username}-${truncatedQuery}`;
 
+      startTiming('search-discord-create-thread');
       const thread = await message.channel.threads.create({
         name: threadName,
         autoArchiveDuration: 60, // 1 hour (shortest Discord allows)
         type: ChannelType.PrivateThread,
         reason: `Creating search session for ${message.author.username}`
       });
+      endTiming('search-discord-create-thread');
 
       // Add member to thread
+      startTiming('search-discord-add-member');
       await thread.members.add(message.author.id);
+      endTiming('search-discord-add-member');
 
       // Create session with user's query (default to haiku for searches)
       cbnSessions[thread.id] = {
@@ -1874,8 +1884,10 @@ client.on('messageCreate', async (message) => {
       };
 
       // Send neutral "shimmer" message immediately
+      startTiming('search-discord-send-shimmer');
       const shimmerMessage = `*The crystal ball shimmers to life...*`;
       await thread.send(shimmerMessage);
+      endTiming('search-discord-send-shimmer');
 
       // Now process the user's query with the AI
       await thread.sendTyping();
@@ -1886,12 +1898,17 @@ client.on('messageCreate', async (message) => {
       });
 
       // Use Haiku for faster item generation
+      startTiming('search-api-item-generation');
       const apiResponse = await sendToClaudeAPI(cbnSessions[thread.id].messages, thread.id, player.account_balance_gp, 'haiku');
+      endTiming('search-api-item-generation');
       const rawResponse = apiResponse.text;
 
       // Parse and format response
+      startTiming('search-parse-response');
       const parsed = parseAndFormatResponse(rawResponse);
+      endTiming('search-parse-response');
 
+      startTiming('search-display-response');
       const { finalResponse, itemsData } = await displayParsedResponse({
         channel: thread,
         parsed,
@@ -1899,6 +1916,7 @@ client.on('messageCreate', async (message) => {
         player,
         threadId: thread.id
       });
+      endTiming('search-display-response');
 
       // Store assistant response
       cbnSessions[thread.id].messages.push({
@@ -1907,7 +1925,9 @@ client.on('messageCreate', async (message) => {
         itemsData: itemsData
       });
 
+      startTiming('search-save-sessions');
       await saveSessions();
+      endTiming('search-save-sessions');
 
       // Delete the "opening portal" confirmation message now that thread is ready
       setTimeout(async () => {
@@ -1918,6 +1938,7 @@ client.on('messageCreate', async (message) => {
         }
       }, 3000);
 
+      endTiming('search-total');
       console.log(`[SEARCH] Created search thread for ${message.author.username}: ${threadName}`);
 
     } catch (error) {

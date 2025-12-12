@@ -76,6 +76,108 @@ Instead of immediately generating random buyers, add a prompt step where players
 - Natural stepping stone to full NPC pitch system in Phase 2
 - Cursed items become opportunities ("infinite rust = infinite iron oxide for an alchemist")
 
+### 1.4 Selection Flow System
+
+**Goal:** Reusable UI pattern for "select N items/NPCs for a purpose" - foundation for crafting, quests, trading
+
+Discord's select menus are limited to 25 options. This system handles pagination, multi-step selection, and validation in a clean message-per-step pattern.
+
+**Pattern: Message-Per-Selection**
+
+Each selection step is its own message. Pagination edits the message in-place.
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Select first item (1-25 of 56)                      │
+│                                                     │
+│ [Dropdown: 25 items]                                │
+│                                                     │
+│ [< Prev] [Next >]                                   │
+└─────────────────────────────────────────────────────┘
+          │
+          │ user selects item
+          v
+┌─────────────────────────────────────────────────────┐
+│ Select first item                                   │
+│                                                     │
+│ Selected: **Scroll of Silence**                     │
+│                                                     │
+│ [Change] [Confirm]                                  │
+└─────────────────────────────────────────────────────┘
+          │
+          │ user confirms, bot posts NEW message
+          v
+┌─────────────────────────────────────────────────────┐
+│ Select second item (1-25 of 55)                     │
+│                                                     │
+│ [Dropdown: excludes already-selected items]         │
+│                                                     │
+│ [< Prev] [Next >] [Back]                            │
+└─────────────────────────────────────────────────────┘
+```
+
+**Use Cases This Enables:**
+
+| Feature | Selections | Source | Notes |
+|---------|------------|--------|-------|
+| Experimental Crafting | 2 items | Inventory | Both consumed |
+| Quest Party Assembly | 1-3 NPCs | Adventurer contacts | Filter by trust level |
+| Commission Materials | 1 item per requirement | Inventory | Semantic validation |
+| Future: Trading | N items | Inventory | To another player |
+
+**Flow Definition Structure:**
+
+```javascript
+const experimentalCraftFlow = {
+  type: 'experimental_craft',
+  steps: [
+    {
+      prompt: 'Select first item',
+      source: (player) => Item.getPlayerInventory(player.player_id),
+      filter: null,
+      required: true
+    },
+    {
+      prompt: 'Select second item',
+      source: (player) => Item.getPlayerInventory(player.player_id),
+      filter: (item, selections) => !selections.includes(item.inventory_id),
+      required: true
+    }
+  ],
+  confirm: {
+    prompt: 'Both items will be destroyed. This cannot be undone.',
+    buttonLabel: 'Combine',
+    onConfirm: async (playerId, selections) => { /* execute */ }
+  }
+};
+```
+
+**Key Features:**
+- **Pre-filtering**: Source function can filter by trust, type, availability
+- **Progressive exclusion**: Already-selected items excluded from later steps
+- **Optional steps**: Skip button for "select 2nd adventurer (optional)"
+- **Validation hooks**: Commission materials get semantic AI check before proceeding
+
+**State Management:**
+
+In-memory Map keyed by thread ID for quick flows (experimental crafting, quest party assembly). No database needed - selection is fast and no items are consumed until confirmation. If bot restarts mid-selection, user just restarts (a few clicks).
+
+```javascript
+const activeSelections = new Map();
+// Key: threadId
+// Value: { playerId, flowType, currentStep, selections[], page, messageId }
+```
+
+Commission material gathering is different - that's a long-running process (days/weeks) and uses the `commission_materials` table for persistence. The selection UI for commissions writes to DB immediately on each material submission.
+
+**Implementation:**
+- [ ] Build generic selection message renderer (dropdown + pagination buttons)
+- [ ] Handle dropdown interaction -> update state, edit message or post next
+- [ ] Handle pagination buttons -> edit message with new page
+- [ ] Handle confirm/change/back buttons -> state transitions
+- [ ] Add validation callback support for commission materials
+- [ ] Test with experimental crafting flow (simplest case)
+
 ---
 
 ## Phase 2: Persistent NPCs & Reputation
@@ -173,28 +275,122 @@ Instead of auto-soliciting random buyers, players can approach a known NPC with 
 
 ## Phase 3: Crafting System
 
-**Goal:** Commission custom items by gathering materials for craftsman NPCs
+**Goal:** Two distinct crafting paths - commissioned high-end items from NPCs, and experimental combination crafting
 
-### 3.1 Crafting Flow
-1. Player describes desired item to craftsman NPC
-2. Craftsman quotes price and lists required materials (checklist)
-3. Player acquires items matching criteria (buy, loot, trade)
-4. Items are consumed when criteria met
-5. Craftsman creates the commissioned item
-6. Item added to inventory, thread locked
+### 3.1 Commissioned Crafting (High-End)
 
-### 3.2 Craftsman NPCs
-- [ ] Craftsman archetype for NPCs
-- [ ] Each craftsman has specialties (weapons, armor, wondrous items)
-- [ ] Trust level affects quality and pricing
-- [ ] Can refuse commissions if trust too low
+For powerful, specific items. Requires NPC relationships and material gathering.
 
-### 3.3 Material Gathering
-- [ ] Criteria matching system ("any rare weapon", "dragon-related item")
-- [ ] Track commission progress in database
-- [ ] Multiple ways to acquire materials: buy, quest loot, trade
+**Flow:**
+1. Player contacts a known craftsman NPC (from contacts list)
+2. Plausibility check: Can this NPC make what you're asking for?
+3. If plausible, craftsman quotes price and lists required materials
+4. Materials are described abstractly (e.g., "Dragon Heart", "Essence of Silence")
+5. Player provides items from inventory to satisfy requirements
+6. Agent evaluates if provided items match criteria semantically
+7. Some materials may require recursive commissions or quest loot
+8. When all requirements met, craftsman creates the item
+9. Items consumed, commissioned item added to inventory
 
-### 3.4 Thread Teardown System
+**Material Matching Examples:**
+- "Dragon Heart" - YES: "Drakthar's Phylactery: the still-beating heart of an immortal dragon"
+- "Dragon Heart" - NO: "Heart-Shaped Dragon Cookies"
+- "Essence of Silence" - YES: "Bottled Void from the Plane of Silence"
+- "Essence of Silence" - NO: "Potion of Deafness"
+
+**Requirements:**
+- [ ] Contact known craftsman NPC (requires reputation from Phase 2)
+- [ ] Plausibility agent: Can this NPC make this item?
+- [ ] Material requirement generation (abstract descriptions)
+- [ ] Semantic matching agent: Does this inventory item satisfy this requirement?
+- [ ] Recursive commission support (material requires its own crafting)
+- [ ] Trust level affects: willingness, pricing, not quality, never material flexibility
+
+### 3.2 Experimental Crafting (Combination)
+
+For creative, unpredictable results. Combine two items blindly and see what happens.
+
+**Flow:**
+1. Player selects two items from inventory
+2. Bot sends both items to AI with no guidance on outcome
+3. AI determines what combining them would produce
+4. Result is unpredictable - could be amazing, useless, or dangerous
+5. Both source items consumed, result added to inventory
+
+**Example Outcomes:**
+- Scroll of Silence + Scroll of Permanency -> "Scroll of Permanent Silence" (hoped for)
+- Scroll of Silence + Scroll of Permanency -> "Scroll of Permanency, Metamagic: Silent" (can silently cast permanency)
+- Scroll of Silence + Scroll of Permanency -> "Ruined Parchment" (failure)
+- Potion of Fire Breath + Potion of Water Breathing -> "Potion of Steam Form"
+- Potion of Fire Breath + Potion of Water Breathing -> "Potion of Fire Breathing"
+- Potion of Fire Breath + Potion of Water Breathing -> "Potion of Billowing Smoke"
+- Bag of Holding + Portable Hole -> Catastrophic failure (both destroyed, possible consequences)
+
+**Design Notes:**
+- No preview or confirmation - true blind combination
+- Outcomes should be creative and follow item logic
+- Failures should be possible but not dominant
+- Dangerous combinations (Bag of Holding + Portable Hole) should have lore-accurate consequences
+- This is gambling with items - high risk, potentially high reward
+- Consider rolling dice 1%-100% on how 'good' the result is, and providing to the model in the request. I.e. give a result that score a 37% quality check.
+- Possible future ways to boost this score via metagame progression / research tree.
+
+**Implementation:**
+- [ ] Two-item selection UI in inventory (how?)
+- [ ] Combination prompt that encourages creative outcomes
+- [ ] No hints about result before committing
+- [ ] Failure/partial success possibilities
+- [ ] Track combination history? (optional - for discovering "recipes")
+
+### 3.3 Craftsman NPCs
+
+- [ ] Craftsman archetype for NPCs (from Phase 2)
+- [ ] Specialties: weapons, armor, wondrous items, potions, scrolls
+- [ ] Trust level affects: willingness, pricing
+- [ ] Can refuse commissions if trust too, complexity too high, or request implausible
+- [ ] High-trust craftsmen may boost the dice roll, high alignment match with NPC may boost dice-roll
+
+### 3.4 Database Schema
+
+```sql
+-- Active commissions
+CREATE TABLE commissions (
+  commission_id INTEGER PRIMARY KEY,
+  player_id INTEGER NOT NULL,
+  npc_id INTEGER NOT NULL,
+  requested_item TEXT NOT NULL,      -- What the player asked for -- Implication here is that the item is already generated and saved in DB as soon as it's requested, we just haven't formed the player_item relationship yet. Leaving it persisted, but in a 'pending' state.
+  quoted_price INTEGER,              -- Gold cost (paid on completion)
+  status TEXT DEFAULT 'pending',     -- 'pending', 'in_progress', 'complete', 'cancelled'
+  created_at DATETIME,               -- not populated until the player actually completes the item
+  FOREIGN KEY (player_id) REFERENCES players(player_id),
+  FOREIGN KEY (npc_id) REFERENCES npcs(npc_id)
+);
+
+-- Materials required for a commission | is this table needed?
+CREATE TABLE commission_materials (
+  material_id INTEGER PRIMARY KEY,
+  commission_id INTEGER NOT NULL,
+  description TEXT NOT NULL,         -- "Dragon Heart", "Essence of Silence"
+  satisfied_by INTEGER,              -- inventory_id of item that satisfied this
+  satisfied_at DATETIME,
+  FOREIGN KEY (commission_id) REFERENCES commissions(commission_id),
+  FOREIGN KEY (satisfied_by) REFERENCES player_inventory(inventory_id)
+);
+
+-- Combination crafting history (optional) | again this might be okay to skip, and just do in memory
+CREATE TABLE combinations (
+  combination_id INTEGER PRIMARY KEY,
+  player_id INTEGER NOT NULL,
+  item1_id INTEGER NOT NULL,
+  item2_id INTEGER NOT NULL,
+  result_id INTEGER,                 -- NULL if failure
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (player_id) REFERENCES players(player_id)
+);
+```
+
+### 3.5 Thread Teardown System
+
 - [ ] Unified teardown logic for: walk-away, completed sale, completed craft
 - [ ] Pass thread to evaluation agent for stat changes
 - [ ] Post summary (reputation change, alignment shift) before locking

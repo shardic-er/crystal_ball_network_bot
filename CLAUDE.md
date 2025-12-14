@@ -10,16 +10,21 @@ A **diegetic magic item collection game** where players interact with the Crysta
 
 **Phase 2 Complete:** Selling system with AI-generated buyers, instant sales, and price negotiation.
 
+**Phase 3 Partial:** Experimental crafting implemented (combine 2 items with synergy scoring).
+
 ## Quick Reference
 
 ```bash
 npm install        # Install dependencies
 npm run dev        # Development mode with auto-restart
 npm start          # Production mode
+npm test           # Run integration tests
 ```
 
 **Key files:**
-- `src/bot.js` - Main bot logic
+- `src/bot.js` - Entry point and event routing (~300 lines)
+- `src/handlers/` - Feature handlers (search, purchase, sell, craft, bootstrap)
+- `src/services/` - Business logic (claude, pricing, sessions, costTracking)
 - `src/prompts/` - AI prompt files (editable without restart)
 - `src/database/` - SQLite database with models
 
@@ -144,17 +149,44 @@ const player = Player.getByDiscordId(session.playerId);
 
 ```
 src/
-├── bot.js                       # Main bot logic
+├── bot.js                       # Entry point - event routing only (~300 lines)
 ├── config.json                  # Bot configuration
 ├── item_schema.json             # JSON schema for items
 ├── cbn_sessions.json            # Active sessions (runtime)
 ├── cost_tracking.json           # API costs (runtime)
+├── selectionFlow.js             # Generic multi-step selection UI
+│
+├── handlers/                    # Feature-specific event handlers
+│   ├── bootstrap.js             # Server setup, channel/thread creation
+│   ├── search.js                # Search flow, cost info, model switching
+│   ├── purchase.js              # Cart reaction handling
+│   ├── sell.js                  # Sell flow, buyers, negotiation
+│   └── craft.js                 # Experimental crafting, synergy scoring
+│
+├── services/                    # Business logic and external APIs
+│   ├── claude.js                # Anthropic API wrapper
+│   ├── pricing.js               # Two-shot pricing system
+│   ├── sessions.js              # Session state management
+│   └── costTracking.js          # API usage tracking
+│
+├── ui/                          # Discord UI utilities
+│   ├── embeds.js                # Item cards, rarity colors, formatting
+│   └── messages.js              # Text splitting, inventory headers
+│
+├── utils/                       # Pure utility functions
+│   ├── config.js                # Configuration loading
+│   ├── prompts.js               # Prompt file loading
+│   └── timing.js                # Delay, profiling helpers
+│
 ├── prompts/                     # AI prompts (editable without restart)
 │   ├── cbn_system_prompt.md     # CBN personality and item generation
 │   ├── cbn_pricing_prompt.md    # Pricing rules
 │   ├── cbn_buyer_prompt.md      # Buyer generation
 │   ├── cbn_negotiation_prompt.md # Negotiation personality
-│   └── cbn_offer_classifier_prompt.md # Price detection
+│   ├── cbn_offer_classifier_prompt.md # Price detection
+│   ├── cbn_crafting_prompt.md   # Crafting result generation
+│   └── cbn_synergy_prompt.md    # Item synergy scoring
+│
 ├── database/
 │   ├── db.js                    # SQLite connection (WAL mode)
 │   ├── schema.sql               # Auto-executed on first run
@@ -162,12 +194,22 @@ src/
 │       ├── Player.js
 │       ├── Item.js
 │       └── InventoryThread.js
+│
 ├── discord_channel_templates/   # Channel content templates
 │   ├── welcome.md
 │   ├── accounts.md
-│   └── crystal-ball-network.md
+│   ├── crystal-ball-network.md
+│   └── workshop.md              # Crafting workshop channel
+│
 └── templates/
     └── inventory_header.md      # Dynamic inventory header
+
+tests/                           # Integration tests
+├── setup.js                     # Test utilities and mocks
+├── search.test.js               # Search flow tests
+├── purchase.test.js             # Purchase flow tests
+├── sell.test.js                 # Sell flow tests
+└── craft.test.js                # Crafting flow tests
 ```
 
 ## Environment Variables
@@ -296,19 +338,35 @@ const items = Item.getPlayerInventory(playerId, true, false);
 - Price negotiation via speech bubble
 - Offer detection classifier
 
-**Phase 3 (Next):**
-- Crafting system
-- UI improvements
-- Transaction history viewing
+**Phase 3 (Partial - Crafting):**
+- [x] Experimental crafting (combine 2 items)
+- [x] Synergy scoring system
+- [x] Selection flow UI for item picking
+- [x] Modular codebase refactoring (bot.js: 2750 -> 300 lines)
+- [ ] Commissioned crafting (NPC craftsmen)
+- [ ] Transaction history viewing
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for complete roadmap.
 
-## Testing Notes
+## Testing
 
+**Run tests:**
+```bash
+npm test              # Run all integration tests
+npm test -- --grep "search"  # Run specific test suite
+```
+
+**Manual testing:**
 - Use `!bootstrap` to recreate channels and inventory threads
 - Database is in `data/cbn.db` - delete to reset
 - Cost tracking in `src/cost_tracking.json` - persists between restarts
 - Sessions in `src/cbn_sessions.json` - cleared on bot restart
+
+**Integration tests cover:**
+- Search flow: query parsing, item generation, display
+- Purchase flow: balance validation, inventory updates
+- Sell flow: buyer generation, negotiation, completion
+- Craft flow: synergy scoring, item combination
 
 ## Further Reading
 

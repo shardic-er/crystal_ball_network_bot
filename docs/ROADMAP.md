@@ -77,7 +77,7 @@ Instead of immediately generating random buyers, add a prompt step where players
 - Natural stepping stone to full NPC pitch system in Phase 2
 - Cursed items become opportunities ("infinite rust = infinite iron oxide for an alchemist")
 
-### 1.4 Selection Flow System
+### 1.4 Selection Flow System - IMPLEMENTED
 
 **Goal:** Reusable UI pattern for "select N items/NPCs for a purpose" - foundation for crafting, quests, trading
 
@@ -172,12 +172,12 @@ const activeSelections = new Map();
 Commission material gathering is different - that's a long-running process (days/weeks) and uses the `commission_materials` table for persistence. The selection UI for commissions writes to DB immediately on each material submission.
 
 **Implementation:**
-- [ ] Build generic selection message renderer (dropdown + pagination buttons)
-- [ ] Handle dropdown interaction -> update state, edit message or post next
-- [ ] Handle pagination buttons -> edit message with new page
-- [ ] Handle confirm/change/back buttons -> state transitions
+- [x] Build generic selection message renderer (dropdown + pagination buttons)
+- [x] Handle dropdown interaction -> update state, edit message or post next
+- [x] Handle pagination buttons -> edit message with new page
+- [x] Handle confirm/change/back buttons -> state transitions
 - [ ] Add validation callback support for commission materials
-- [ ] Test with experimental crafting flow (simplest case)
+- [x] Test with experimental crafting flow (simplest case)
 
 ### 1.5 Item Showcase System
 
@@ -394,41 +394,34 @@ For powerful, specific items. Requires NPC relationships and material gathering.
 - [ ] Recursive commission support (material requires its own crafting)
 - [ ] Trust level affects: willingness, pricing, not quality, never material flexibility
 
-### 3.2 Experimental Crafting (Combination)
+### 3.2 Experimental Crafting (Combination) - IMPLEMENTED
 
 For creative, unpredictable results. Combine two items blindly and see what happens.
 
 **Flow:**
-1. Player selects two items from inventory
-2. Bot sends both items to AI with no guidance on outcome
-3. AI determines what combining them would produce
-4. Result is unpredictable - could be amazing, useless, or dangerous
-5. Both source items consumed, result added to inventory
+1. Player clicks "Experimental Crafting" button in #workshop channel
+2. Bot creates private crafting thread
+3. Player selects two items via dropdown menus (pagination for large inventories)
+4. Synergy scoring evaluates compatibility (5 categories, 1-5 scale each)
+5. Quality roll: 1d100 + synergy bonus determines outcome quality
+6. AI generates new item based on inputs and quality roll
+7. Both source items consumed, result added to inventory
 
-**Example Outcomes:**
-- Scroll of Silence + Scroll of Permanency -> "Scroll of Permanent Silence" (hoped for)
-- Scroll of Silence + Scroll of Permanency -> "Scroll of Permanency, Metamagic: Silent" (can silently cast permanency)
-- Scroll of Silence + Scroll of Permanency -> "Ruined Parchment" (failure)
-- Potion of Fire Breath + Potion of Water Breathing -> "Potion of Steam Form"
-- Potion of Fire Breath + Potion of Water Breathing -> "Potion of Fire Breathing"
-- Potion of Fire Breath + Potion of Water Breathing -> "Potion of Billowing Smoke"
-- Bag of Holding + Portable Hole -> Catastrophic failure (both destroyed, possible consequences)
+**Synergy Categories:**
+- Physical Compatibility: Do the items physically combine?
+- Complication Countering: Do complications cancel each other?
+- Thematic Harmony: Do the items share themes/origins?
+- Power Level Matching: Are the items similar power?
+- Historical Synergy: Do their histories connect?
 
-**Design Notes:**
-- No preview or confirmation - true blind combination
-- Outcomes should be creative and follow item logic
-- Failures should be possible but not dominant
-- Dangerous combinations (Bag of Holding + Portable Hole) should have lore-accurate consequences
-- This is gambling with items - high risk, potentially high reward
-- Consider rolling dice 1%-100% on how 'good' the result is, and providing to the model in the request. I.e. give a result that score a 37% quality check.
-- Possible future ways to boost this score via metagame progression / research tree.
-
-**Implementation:**
-- [ ] Two-item selection UI in inventory (how?)
-- [ ] Combination prompt that encourages creative outcomes
-- [ ] No hints about result before committing
-- [ ] Failure/partial success possibilities
-- [ ] Track combination history? (optional - for discovering "recipes")
+**Implementation Status:**
+- [x] Two-item selection UI via selectionFlow.js
+- [x] Synergy scoring prompt (cbn_synergy_prompt.md)
+- [x] Crafting prompt for outcome generation (cbn_crafting_prompt.md)
+- [x] Quality roll with synergy bonus
+- [x] Item consumption and creation
+- [ ] Track combination history (optional - for discovering "recipes")
+- [ ] Failure/partial success based on very low rolls
 
 ### 3.3 Craftsman NPCs
 
@@ -703,35 +696,38 @@ ALTER TABLE npcs ADD COLUMN disabled_reason TEXT;
 
 ## Technical Debt & Future Work
 
-### URGENT: bot.js Refactoring
-**Priority: HIGH** - bot.js has grown too large (2400+ lines) and needs modular extraction.
+### COMPLETE: bot.js Refactoring
+**Status: DONE** - bot.js reduced from 2750 lines to ~300 lines.
 
-Proposed module structure:
+Implemented module structure:
 ```
 src/
-+-- bot.js                    # Entry point, Discord client setup, event routing
++-- bot.js                    # Entry point, event routing (~300 lines)
 +-- handlers/
-|   +-- search.js             # Search flow (message handling, AI calls)
-|   +-- purchase.js           # Purchase reactions, inventory management
-|   +-- sell.js               # Sell flow, buyer generation, negotiation
+|   +-- bootstrap.js          # Server setup, channel creation
+|   +-- search.js             # Search flow, cost info, model switching
+|   +-- purchase.js           # Cart reaction handling
+|   +-- sell.js               # Sell flow, buyers, negotiation
 |   +-- craft.js              # Experimental crafting, synergy scoring
 +-- services/
-|   +-- claude.js             # AI client wrapper, cost tracking
+|   +-- claude.js             # Anthropic API wrapper
 |   +-- pricing.js            # Two-shot pricing system
-|   +-- inventory.js          # Inventory thread management
+|   +-- sessions.js           # Session state management
+|   +-- costTracking.js       # API usage tracking
 +-- ui/
-|   +-- selectionFlow.js      # Generic selection UI (already started)
-|   +-- embeds.js             # Discord embed formatting
+|   +-- embeds.js             # Item cards, formatting
+|   +-- messages.js           # Text splitting, headers
 +-- utils/
-    +-- prompts.js            # Prompt loading
-    +-- session.js            # Session management
+|   +-- config.js             # Configuration loading
+|   +-- prompts.js            # Prompt file loading
+|   +-- timing.js             # Delay, profiling helpers
 ```
 
-- [ ] Extract handlers into separate modules
-- [ ] Create shared services layer
-- [ ] Move selection flow to ui/
-- [ ] Consolidate prompt loading
-- [ ] Add proper exports/imports
+- [x] Extract handlers into separate modules
+- [x] Create shared services layer
+- [x] Consolidate prompt loading
+- [x] Add proper exports/imports
+- [x] Selection flow exists at src/selectionFlow.js
 
 ### Database
 - [ ] NPC tables and relationships
@@ -773,4 +769,4 @@ src/
 ---
 
 **Last Updated:** 2025-12-14
-**Current Phase:** Phase 1 - Performance & Polish
+**Current Phase:** Phase 1/3 - Performance & Polish / Crafting (Experimental crafting complete, commissioned crafting pending)

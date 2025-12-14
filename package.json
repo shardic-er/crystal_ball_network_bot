@@ -5,7 +5,12 @@
   "main": "src/bot.js",
   "scripts": {
     "start": "node src/bot.js",
-    "dev": "node --watch src/bot.js"
+    "dev": "node --watch src/bot.js",
+    "test": "mocha tests/*.test.js --timeout 10000",
+    "test:search": "mocha tests/search.test.js --timeout 10000",
+    "test:purchase": "mocha tests/purchase.test.js --timeout 10000",
+    "test:sell": "mocha tests/sell.test.js --timeout 10000",
+    "test:craft": "mocha tests/craft.test.js --timeout 10000"
   },
   "keywords": [
     "discord",
@@ -24,5 +29,8 @@
     "discord.js": "^14.14.1",
     "dotenv": "^16.4.5",
     "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "mocha": "^10.8.2"
   }
 }

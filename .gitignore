@@ -5,6 +5,7 @@ cost_tracking.json
 data/
 *.log
 .DS_Store
+.claude/
 
 # SQLite WAL files
 *.db-wal

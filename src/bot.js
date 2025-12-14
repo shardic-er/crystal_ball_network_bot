@@ -1,10 +1,11 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, EmbedBuilder, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
 const { Player, InventoryThread, Item } = require('./database/models');
+const selectionFlow = require('./selectionFlow');
 
 // Load config
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -37,6 +38,8 @@ const CBN_PRICING_PROMPT_PATH = path.join(PROMPTS_DIR, 'cbn_pricing_prompt.md');
 const CBN_BUYER_PROMPT_PATH = path.join(PROMPTS_DIR, 'cbn_buyer_prompt.md');
 const CBN_NEGOTIATION_PROMPT_PATH = path.join(PROMPTS_DIR, 'cbn_negotiation_prompt.md');
 const CBN_OFFER_CLASSIFIER_PATH = path.join(PROMPTS_DIR, 'cbn_offer_classifier_prompt.md');
+const CBN_CRAFTING_PROMPT_PATH = path.join(PROMPTS_DIR, 'cbn_crafting_prompt.md');
+const CBN_SYNERGY_PROMPT_PATH = path.join(PROMPTS_DIR, 'cbn_synergy_prompt.md');
 const TEMPLATES_DIR = path.join(__dirname, 'discord_channel_templates');
 const GAME_CHANNEL_NAME = 'crystal-ball-network';
 const ACCOUNTS_CHANNEL_NAME = 'accounts';
@@ -129,6 +132,8 @@ let cbnPricingPromptContent = '';
 let cbnBuyerPromptContent = '';
 let cbnNegotiationPromptContent = '';
 let cbnOfferClassifierContent = '';
+let cbnCraftingPromptContent = '';
+let cbnSynergyPromptContent = '';
 let cbnSessions = {};
 let costTracking = {
   dailySpend: {},
@@ -184,6 +189,26 @@ async function initialize() {
   } catch (error) {
     console.error('FATAL ERROR: Could not load CBN offer classifier:', error);
     console.error('Make sure cbn_offer_classifier_prompt.md exists in the src directory');
+    process.exit(1);
+  }
+
+  console.log('Loading CBN crafting prompt...');
+  try {
+    cbnCraftingPromptContent = await fs.readFile(CBN_CRAFTING_PROMPT_PATH, 'utf-8');
+    console.log('CBN crafting prompt loaded successfully');
+  } catch (error) {
+    console.error('FATAL ERROR: Could not load CBN crafting prompt:', error);
+    console.error('Make sure cbn_crafting_prompt.md exists in the prompts directory');
+    process.exit(1);
+  }
+
+  console.log('Loading CBN synergy prompt...');
+  try {
+    cbnSynergyPromptContent = await fs.readFile(CBN_SYNERGY_PROMPT_PATH, 'utf-8');
+    console.log('CBN synergy prompt loaded successfully');
+  } catch (error) {
+    console.error('FATAL ERROR: Could not load CBN synergy prompt:', error);
+    console.error('Make sure cbn_synergy_prompt.md exists in the prompts directory');
     process.exit(1);
   }
 
@@ -535,7 +560,7 @@ async function displayParsedResponse({ channel, parsed, rawResponse, player, thr
 }
 
 function parseAndFormatResponse(responseText) {
--  // Try to extract JSON from response
+  // Try to extract JSON from response
   const jsonMatch = responseText.match(/\{[\s\S]*\}/);
   if (!jsonMatch) {
     return { type: 'plain', content: responseText, items: [] };
@@ -770,9 +795,33 @@ async function cleanupSellThread(session, channel) {
     console.warn('[SELL] Could not lock thread:', e.message);
   }
 
+  // Post close button
+  await postCloseThreadButton(channel);
+
   // Clean up session
   delete cbnSessions[channel.id];
   await saveSessions();
+}
+
+/**
+ * Post a button to close/archive a thread
+ * @param {Object} thread - Discord thread channel
+ */
+async function postCloseThreadButton(thread) {
+  try {
+    const closeButton = new ButtonBuilder()
+      .setCustomId('thread_close')
+      .setLabel('Close Thread')
+      .setStyle(ButtonStyle.Secondary);
+
+    const buttonRow = new ActionRowBuilder().addComponents(closeButton);
+    await thread.send({
+      content: '*This session has ended. Click below to close this thread.*',
+      components: [buttonRow]
+    });
+  } catch (e) {
+    console.warn('[THREAD] Could not post close button:', e.message);
+  }
 }
 
 /**
@@ -1122,6 +1171,17 @@ async function bootstrapServer(guild, statusMessage) {
       await delay(500);
     }
 
+    // Add button for workshop channel
+    if (config.name === 'workshop') {
+      const craftButton = new ButtonBuilder()
+        .setCustomId('workshop_experimental_craft')
+        .setLabel('Experimental Crafting')
+        .setStyle(ButtonStyle.Primary);
+
+      const buttonRow = new ActionRowBuilder().addComponents(craftButton);
+      await channel.send({ components: [buttonRow] });
+    }
+
     if (config.isReadOnly) {
       await channel.permissionOverwrites.edit(guild.id, {
         SendMessages: false,
@@ -1371,7 +1431,11 @@ client.on('messageReactionAdd', async (reaction, user) => {
       const session = cbnSessions[threadId];
 
       if (!session) {
-        await message.channel.send('This search session is no longer active. Please start a new search by typing your query in #crystal-ball-network.');
+        try {
+          await message.channel.send('This search session is no longer active. Please start a new search by typing your query in #crystal-ball-network.');
+        } catch (e) {
+          console.warn('[PURCHASE] Could not send session expired message:', e.message);
+        }
         return;
       }
 
@@ -1472,7 +1536,11 @@ client.on('messageReactionAdd', async (reaction, user) => {
 
     } catch (error) {
       console.error('[PURCHASE] Error processing purchase:', error);
-      await message.channel.send(`Error processing purchase: ${error.message}`);
+      try {
+        await message.channel.send(`Error processing purchase: ${error.message}`);
+      } catch (e) {
+        console.warn('[PURCHASE] Could not send error message:', e.message);
+      }
     }
   }
 
@@ -1844,7 +1912,7 @@ client.on('messageCreate', async (message) => {
       await message.delete();
       endTiming('search-discord-delete-msg');
 
-      // Send immediate confirmation in main channel (will be deleted after thread is created)
+      // Send immediate ephemeral-style confirmation (deleted quickly after thread is created)
       startTiming('search-discord-send-confirmation');
       const confirmation = await message.channel.send(
         `Opening search portal for ${message.author}...`
@@ -1952,6 +2020,22 @@ client.on('messageCreate', async (message) => {
   if (!message.channel.isThread()) return;
 
   const threadId = message.channel.id;
+
+  // Handle crafting threads - delete messages and notify user to use dropdowns
+  if (message.channel.name?.startsWith('experimental crafting -')) {
+    try {
+      await message.delete();
+      const hint = await message.channel.send(
+        `*The workshop does not respond to words. Please use the dropdown menus to select items.*`
+      );
+      setTimeout(async () => {
+        try { await hint.delete(); } catch (e) { /* ignore */ }
+      }, 5000);
+    } catch (e) {
+      console.warn('[CRAFT] Could not delete message in crafting thread:', e.message);
+    }
+    return;
+  }
 
   if (!cbnSessions[threadId]) return;
 
@@ -2109,6 +2193,557 @@ My apologies, esteemed customer. The CBN network experienced a momentary disrupt
 *Error details: ${error.message}*`;
 
     await message.channel.send(errorResponse);
+  }
+});
+
+/**
+ * Handle the Workshop "Experimental Crafting" button click
+ * Creates a crafting thread and starts the item selection flow
+ * @param {Object} interaction - Discord button interaction
+ */
+async function handleWorkshopCraftButton(interaction) {
+  const user = interaction.user;
+  const guild = interaction.guild;
+
+  // Acknowledge the button click with a deferred reply (not ephemeral so we can delete it)
+  await interaction.deferReply({ ephemeral: false });
+
+  // Get or create player
+  const player = Player.getOrCreate(user.id, user.username, 500);
+
+  // Get player's inventory
+  const inventory = Item.getPlayerInventory(player.player_id, true, false);
+
+  if (inventory.length < 2) {
+    // Send error as interaction reply that auto-deletes
+    const errorMsg = await interaction.editReply(
+      `${user}, you need at least 2 items in your inventory to use experimental crafting.`
+    );
+    setTimeout(async () => {
+      try { await errorMsg.delete(); } catch (e) { /* ignore */ }
+    }, 10000);
+    return;
+  }
+
+  // Find the workshop channel to create thread in
+  const workshopChannel = interaction.channel;
+
+  // Create crafting thread
+  const threadName = `experimental crafting - ${user.username}`;
+  const craftThread = await workshopChannel.threads.create({
+    name: threadName,
+    autoArchiveDuration: 60, // 1 hour (shortest Discord allows)
+    type: ChannelType.PrivateThread,
+    reason: `Experimental crafting session for ${user.username}`
+  });
+
+  await craftThread.members.add(user.id);
+
+  // Don't lock thread during selection - buttons won't work if locked
+  // We'll lock after crafting executes
+
+  // Send confirmation message via interaction reply that auto-deletes after 10 seconds
+  const confirmation = await interaction.editReply(
+    `Crafting session started for ${user}! Head to <#${craftThread.id}>`
+  );
+  setTimeout(async () => {
+    try { await confirmation.delete(); } catch (e) { /* ignore */ }
+  }, 10000);
+
+  // Post intro message
+  await craftThread.send(selectionFlow.buildIntroMessage(selectionFlow.FLOW_DEFINITIONS.experimental_craft));
+
+  // Start the selection flow
+  const flowState = selectionFlow.startFlow({
+    threadId: craftThread.id,
+    playerId: user.id,
+    flowType: 'experimental_craft',
+    sourceItems: inventory,
+    context: { guild },
+    onConfirm: async (playerId, selections, context) => {
+      await executeExperimentalCraft(playerId, selections, craftThread, context.guild);
+    }
+  });
+
+  // Post the first selection message
+  const { content, components } = selectionFlow.buildSelectionMessage(flowState);
+  const selectionMsg = await craftThread.send({ content, components });
+  selectionFlow.setMessageId(craftThread.id, selectionMsg.id);
+
+  console.log(`[CRAFT] Started experimental crafting session for ${user.username}`);
+}
+
+/**
+ * Score the synergy between two items for crafting
+ * @param {Object} item1 - First item data
+ * @param {Object} item2 - Second item data
+ * @param {string} threadId - Thread ID for cost tracking
+ * @returns {Promise<Object>} Synergy scoring result
+ */
+async function scoreCraftingSynergy(item1, item2, threadId) {
+  console.log('[CRAFT] Scoring item synergy...');
+
+  const synergyInput = JSON.stringify({
+    item1: {
+      name: item1.name,
+      itemType: item1.item_type,
+      rarity: item1.rarity,
+      description: item1.description,
+      history: item1.history,
+      properties: item1.properties,
+      complication: item1.complication
+    },
+    item2: {
+      name: item2.name,
+      itemType: item2.item_type,
+      rarity: item2.rarity,
+      description: item2.description,
+      history: item2.history,
+      properties: item2.properties,
+      complication: item2.complication
+    }
+  }, null, 2);
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5',
+      max_tokens: 1024,
+      system: cbnSynergyPromptContent,
+      messages: [{ role: 'user', content: synergyInput }]
+    });
+
+    await trackCost(threadId, response.usage);
+    const synergyResponse = response.content[0].text;
+    console.log(`[CRAFT] Synergy response received (${response.usage.input_tokens} input, ${response.usage.output_tokens} output tokens)`);
+
+    const jsonMatch = synergyResponse.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Synergy response did not contain valid JSON');
+    }
+
+    const synergy = JSON.parse(jsonMatch[0]);
+
+    // Validate and clamp scores to 1-5 range
+    const categories = ['physicalCompatibility', 'complicationCountering', 'thematicHarmony', 'powerLevelMatching', 'historicalSynergy'];
+    for (const cat of categories) {
+      if (synergy[cat]?.score) {
+        synergy[cat].score = Math.max(1, Math.min(5, synergy[cat].score));
+      }
+    }
+
+    // Recalculate totalBonus to ensure accuracy
+    synergy.totalBonus = categories.reduce((sum, cat) => sum + (synergy[cat]?.score || 1), 0);
+
+    console.log(`[CRAFT] Synergy scores: Physical=${synergy.physicalCompatibility?.score}, Complication=${synergy.complicationCountering?.score}, Thematic=${synergy.thematicHarmony?.score}, Power=${synergy.powerLevelMatching?.score}, History=${synergy.historicalSynergy?.score}, Total=${synergy.totalBonus}`);
+
+    return synergy;
+  } catch (error) {
+    console.error('[CRAFT] Error scoring synergy:', error);
+    // Return default scores on error
+    return {
+      physicalCompatibility: { score: 3, reason: 'Unable to assess' },
+      complicationCountering: { score: 3, reason: 'Unable to assess' },
+      thematicHarmony: { score: 3, reason: 'Unable to assess' },
+      powerLevelMatching: { score: 3, reason: 'Unable to assess' },
+      historicalSynergy: { score: 3, reason: 'Unable to assess' },
+      totalBonus: 15,
+      overallAssessment: 'The arcane energies are difficult to read...'
+    };
+  }
+}
+
+/**
+ * Format synergy scores for display
+ * @param {Object} synergy - Synergy scoring result
+ * @returns {string} Formatted markdown
+ */
+function formatSynergyDisplay(synergy) {
+  return `**Synergy Analysis**
+**Physical Fit:** ${synergy.physicalCompatibility?.score || 3}
+**Complication Counter:** ${synergy.complicationCountering?.score || 3}
+**Thematic Harmony:** ${synergy.thematicHarmony?.score || 3}
+**Power Match:** ${synergy.powerLevelMatching?.score || 3}
+**History Synergy:** ${synergy.historicalSynergy?.score || 3}
+
+**Synergy Bonus: +${synergy.totalBonus}**`;
+}
+
+/**
+ * Execute the experimental crafting - call AI to determine result
+ * @param {string} playerId - Discord user ID
+ * @param {Array} selections - Array of selected items (2 items)
+ * @param {Object} thread - Discord thread channel
+ * @param {Object} guild - Discord guild
+ */
+async function executeExperimentalCraft(playerId, selections, thread, guild) {
+  const [item1, item2] = selections;
+
+  console.log(`[CRAFT] Combining: ${item1.name} + ${item2.name}`);
+
+  // First, score the synergy between items
+  await thread.send(`*The workshop's arcane sensors analyze your materials...*`);
+
+  const synergy = await scoreCraftingSynergy(item1, item2, thread.id);
+
+  // Display synergy analysis
+  await thread.send(formatSynergyDisplay(synergy));
+  await delay(500);
+
+  // Roll 1d100 for crafting quality (determines complication severity)
+  const baseRoll = Math.floor(Math.random() * 100) + 1;
+  const qualityRoll = baseRoll + synergy.totalBonus;
+  console.log(`[CRAFT] Base roll: ${baseRoll}, Synergy bonus: +${synergy.totalBonus}, Final quality: ${qualityRoll}`);
+
+  await thread.send(`*The workshop fills with crackling energy as you combine **${item1.name}** and **${item2.name}**...*\n\n**Quality Roll: ${baseRoll}** (base) + **${synergy.totalBonus}** (synergy) = **${qualityRoll}**`);
+
+  const player = Player.getByDiscordId(playerId);
+  if (!player) {
+    await thread.send('Error: Player not found.');
+    return;
+  }
+
+  // Get inventory thread reference (but don't modify anything yet)
+  const invThread = InventoryThread.getByPlayerId(player.player_id);
+  let inventoryChannel = null;
+  if (invThread) {
+    try {
+      inventoryChannel = await guild.channels.fetch(invThread.discord_thread_id);
+    } catch (error) {
+      console.error('[CRAFT] Error accessing inventory thread:', error);
+    }
+  }
+
+  // Format items for the crafting prompt
+  const craftingInput = JSON.stringify({
+    crafterName: player.username,
+    qualityRoll: qualityRoll,
+    item1: {
+      name: item1.name,
+      itemType: item1.item_type,
+      rarity: item1.rarity,
+      description: item1.description,
+      history: item1.history,
+      properties: item1.properties,
+      complication: item1.complication
+    },
+    item2: {
+      name: item2.name,
+      itemType: item2.item_type,
+      rarity: item2.rarity,
+      description: item2.description,
+      history: item2.history,
+      properties: item2.properties,
+      complication: item2.complication
+    }
+  }, null, 2);
+
+  // ========== PHASE 1: Generate and validate the crafted item ==========
+  // Items are NOT consumed until we have a valid result
+  let craftingResult;
+  let itemPrice;
+
+  try {
+    console.log('[CRAFT] Calling AI to generate crafting result...');
+
+    // Call AI to generate the new item
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 2048,
+      system: cbnCraftingPromptContent,
+      messages: [{ role: 'user', content: craftingInput }]
+    });
+
+    await trackCost(thread.id, response.usage);
+    const craftingResponse = response.content[0].text;
+    console.log(`[CRAFT] Received crafting response (${response.usage.input_tokens} input, ${response.usage.output_tokens} output tokens)`);
+
+    // Parse the JSON response
+    const jsonMatch = craftingResponse.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('Crafting response did not contain valid JSON');
+    }
+
+    craftingResult = JSON.parse(jsonMatch[0]);
+
+    // Validate required fields
+    if (!craftingResult.result || !craftingResult.result.name) {
+      throw new Error('Crafting response missing required fields');
+    }
+
+    console.log(`[CRAFT] Generated item: ${craftingResult.result.name}`);
+
+    // Price the new item using the existing pricing system
+    console.log('[CRAFT] Pricing new item...');
+    const itemForPricing = {
+      name: craftingResult.result.name,
+      rarity: craftingResult.result.rarity,
+      properties: craftingResult.result.properties,
+      complication: craftingResult.result.complication
+    };
+    const prices = await addPricingToItems([itemForPricing], thread.id);
+    itemPrice = typeof prices[0] === 'number' ? prices[0] : 100; // Fallback price
+
+    console.log(`[CRAFT] Item priced at ${itemPrice}gp`);
+
+  } catch (error) {
+    // AI generation or parsing failed - items are NOT consumed
+    console.error('[CRAFT] Error generating crafted item:', error);
+
+    await thread.send(
+      `**Crafting Interrupted!**\n\n` +
+      `*The arcane energies flicker and dissipate harmlessly. The workshop's safety wards activate, preserving your items.*\n\n` +
+      `Your items have been returned to your inventory. Please try again later.`
+    );
+
+    // Lock thread and post close button - items are safe
+    try {
+      await thread.setLocked(true);
+      await postCloseThreadButton(thread);
+    } catch (e) {
+      console.warn(`[CRAFT] Could not lock thread: ${e.message}`);
+    }
+    return;
+  }
+
+  // ========== PHASE 2: Consume source items and create new item ==========
+  // Only reached if AI generation was successful
+
+  // Send the narrative message
+  if (craftingResult.narrative) {
+    await thread.send(`*${craftingResult.narrative}*`);
+    await delay(500);
+  }
+
+  // NOW consume the source items (point of no return)
+  console.log('[CRAFT] Consuming source items...');
+  Item.removeFromInventory(item1.inventory_id, player.player_id);
+  Item.removeFromInventory(item2.inventory_id, player.player_id);
+
+  // Delete item messages from inventory thread
+  if (inventoryChannel) {
+    for (const item of selections) {
+      if (item.discord_message_id) {
+        try {
+          const itemMsg = await inventoryChannel.messages.fetch(item.discord_message_id);
+          await itemMsg.delete();
+        } catch (e) {
+          console.warn(`[CRAFT] Could not delete item message: ${e.message}`);
+        }
+      }
+    }
+  }
+
+  // Create the new item in the database
+  const newItemData = {
+    name: craftingResult.result.name,
+    itemType: craftingResult.result.itemType,
+    rarity: craftingResult.result.rarity,
+    description: craftingResult.result.description,
+    history: craftingResult.result.history,
+    properties: craftingResult.result.properties,
+    complication: craftingResult.result.complication
+  };
+
+  const dbItem = Item.create(newItemData, itemPrice);
+  console.log(`[CRAFT] Created item in database: ${dbItem.item_id}`);
+
+  // Display the crafted item card in the thread
+  const craftedEmbed = formatItemAsEmbed(craftingResult.result, itemPrice, {
+    priceLabel: 'Value',
+    footer: 'Crafted item - Check your inventory!'
+  });
+  await thread.send({ embeds: [craftedEmbed] });
+
+  // Add the item to the player's inventory
+  if (inventoryChannel && invThread) {
+    try {
+      // Unlock inventory to post item
+      await inventoryChannel.setLocked(false);
+
+      // Post item in inventory thread
+      const inventoryEmbed = formatItemAsEmbed(craftingResult.result, itemPrice, { priceLabel: 'Crafted Value' });
+      const inventoryMessage = await inventoryChannel.send({ embeds: [inventoryEmbed] });
+      await inventoryMessage.react('\u{2696}'); // scales - click to sell
+
+      // Add to inventory in database
+      Item.addToInventory(dbItem.item_id, player.player_id, itemPrice, inventoryMessage.id);
+      console.log(`[CRAFT] Added item to player inventory`);
+
+      // Update inventory header
+      const headerMessage = await inventoryChannel.messages.fetch(invThread.header_message_id);
+      const updatedInventory = Item.getPlayerInventory(player.player_id, true, false);
+      const totalValue = updatedInventory.reduce((sum, i) => sum + (i.purchase_price_gp || 0), 0);
+      const updatedHeader = await getInventoryHeader(player.account_balance_gp, updatedInventory.length, totalValue);
+      await headerMessage.edit(updatedHeader);
+
+      // Re-lock inventory thread
+      await inventoryChannel.setLocked(true);
+    } catch (error) {
+      console.error('[CRAFT] Error adding item to inventory:', error);
+      await thread.send('*Warning: There was an error adding the item to your inventory. Please contact an administrator.*');
+    }
+  }
+
+  // Send completion message
+  await thread.send(`**Crafting Complete!** Your new item **${craftingResult.result.name}** has been added to your inventory.`);
+
+  // Lock the thread and post close button when crafting is complete
+  try {
+    await postCloseThreadButton(thread);
+    await thread.setLocked(true);
+    console.log(`[CRAFT] Locked crafting thread ${thread.id}`);
+  } catch (e) {
+    console.warn(`[CRAFT] Could not lock thread: ${e.message}`);
+  }
+
+  console.log(`[CRAFT] Crafting complete for player ${player.username}`);
+}
+
+// Handle Discord component interactions (buttons, select menus)
+client.on('interactionCreate', async (interaction) => {
+  try {
+    // Handle workshop button (creates new crafting thread)
+    if (interaction.isButton() && interaction.customId === 'workshop_experimental_craft') {
+      await handleWorkshopCraftButton(interaction);
+      return;
+    }
+
+    // Handle thread close button (archives the thread)
+    if (interaction.isButton() && interaction.customId === 'thread_close') {
+      const thread = interaction.channel;
+      if (thread && thread.isThread()) {
+        try {
+          await interaction.update({
+            content: '*Closing thread...*',
+            components: []
+          });
+          await thread.setArchived(true);
+        } catch (e) {
+          console.warn('[THREAD] Could not archive thread:', e.message);
+          await interaction.reply({ content: 'Could not close thread.', ephemeral: true }).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    const threadId = interaction.channel?.id;
+    if (!threadId) return;
+
+    // Handle selection flow interactions
+    const flowState = selectionFlow.getFlowState(threadId);
+    if (!flowState) return;
+
+    // Verify user owns this flow
+    if (flowState.playerId !== interaction.user.id) {
+      await interaction.reply({ content: 'This selection is not yours.', ephemeral: true });
+      return;
+    }
+
+    const customId = interaction.customId;
+
+    // Handle dropdown selection
+    if (interaction.isStringSelectMenu() && customId.startsWith('selection_choose_')) {
+      const selectedValue = interaction.values[0];
+      const result = selectionFlow.handleSelection(threadId, selectedValue);
+
+      if (result) {
+        const { content, components } = selectionFlow.buildSelectionMessage(result.state);
+
+        // Selection now immediately advances - post new message for next step
+        if (result.shouldPostNew) {
+          // Replace current message with item embed card
+          const selectedItem = result.selectedItem;
+          const itemEmbed = formatItemAsEmbed(selectedItem, selectedItem.purchase_price_gp, {
+            priceLabel: 'Value'
+          });
+
+          await interaction.update({
+            content: '',
+            embeds: [itemEmbed],
+            components: []
+          });
+
+          // Post new message for next step
+          const newMsg = await interaction.channel.send({ content, components });
+          selectionFlow.setMessageId(threadId, newMsg.id);
+        } else {
+          await interaction.update({ content, components });
+        }
+      }
+      return;
+    }
+
+    // Handle button clicks
+    if (interaction.isButton()) {
+      let result;
+      let shouldEdit = false;
+      let shouldPostNew = false;
+
+      if (customId.startsWith('selection_prev_')) {
+        result = selectionFlow.handlePagination(threadId, 'prev');
+        shouldEdit = true;
+      } else if (customId.startsWith('selection_next_')) {
+        result = selectionFlow.handlePagination(threadId, 'next');
+        shouldEdit = true;
+      } else if (customId.startsWith('selection_cancel_')) {
+        selectionFlow.handleCancel(threadId);
+        await interaction.update({
+          content: '**Selection cancelled.**',
+          components: []
+        });
+        return;
+      } else if (customId.startsWith('selection_execute_')) {
+        await interaction.deferUpdate();
+
+        // Show processing message
+        await interaction.editReply({
+          content: '**Processing...**',
+          components: []
+        });
+
+        // Execute the flow
+        const execResult = await selectionFlow.handleExecute(threadId);
+
+        if (execResult) {
+          // The onConfirm callback handles the actual work
+          // Just clean up the message
+          await interaction.editReply({
+            content: '**Combination complete!** Check the thread for results.',
+            components: []
+          });
+        }
+        return;
+      }
+
+      if (result) {
+        if (shouldPostNew) {
+          // Acknowledge the current interaction
+          await interaction.update({
+            content: interaction.message.content.replace(/\*\*.*\*\*/, '**Confirmed**'),
+            components: []
+          });
+
+          // Post new message for next step
+          const { content, components } = selectionFlow.buildSelectionMessage(result.state);
+          const newMsg = await interaction.channel.send({ content, components });
+          selectionFlow.setMessageId(threadId, newMsg.id);
+        } else if (shouldEdit) {
+          const { content, components } = selectionFlow.buildSelectionMessage(result.state);
+          await interaction.update({ content, components });
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[INTERACTION] Error handling interaction:', error);
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: 'An error occurred.', ephemeral: true });
+      } else {
+        await interaction.reply({ content: 'An error occurred.', ephemeral: true });
+      }
+    } catch (e) {
+      // Ignore follow-up errors
+    }
   }
 });
 

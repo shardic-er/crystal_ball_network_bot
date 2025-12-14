@@ -49,6 +49,7 @@ A diegetic D&D item shop simulator that evolves into an adventuring guild manage
 - [ ] Better loading indicators during generation
 - [ ] Clearer error messages
 - [ ] Smoother thread creation flow
+- [ ] Research auto-expiring ephemeral messages (currently we have a timeout function edit / delete messages, but ephemeral messages might allow thread creation confirmation messages to be sent to individual players without notifying other players. This has clear advantages, but currently ephemeral messages require the user to manually dismiss, as the bot lacks permission to remove them)
 
 ### 1.3 Targeted Buyer Prompt
 
@@ -177,6 +178,93 @@ Commission material gathering is different - that's a long-running process (days
 - [ ] Handle confirm/change/back buttons -> state transitions
 - [ ] Add validation callback support for commission materials
 - [ ] Test with experimental crafting flow (simplest case)
+
+### 1.5 Item Showcase System
+
+**Goal:** Let players publicly display prized items in a social, non-ephemeral thread
+
+Players can showcase items from their inventory to a public thread where other players can see and discuss their collection. Creates social engagement and "show off" opportunities.
+
+**Channel Structure:**
+```
+CRYSTAL BALL NETWORK (Category)
++-- #gallery-of-wonders          <-- NEW: Container for showcase threads
+    +-- showcase-[username]       <-- Per-player, public, 7-day auto-archive
+```
+
+**Flow:**
+1. Player clicks showcase emoji on item in inventory thread
+2. Bot retrieves fresh item data from DB (by inventory_id, not text parsing)
+3. If player has no showcase thread, create one in #gallery-of-wonders
+   - Thread is public, unlocked, 7-day auto-archive (or max duration)
+   - Named `showcase-[username]`
+4. Post item card to showcase thread (no special reaction emojis)
+5. In inventory thread:
+   - Remove showcase emoji from item message
+   - Remove bot's reaction
+   - Add "un-showcase" emoji to item message
+6. Track showcase in database (item_id -> showcase_message_id)
+
+**Un-showcase Flow:**
+1. Player clicks un-showcase emoji on item in inventory thread
+2. Bot deletes the item message from showcase thread
+3. Remove un-showcase emoji, re-add showcase emoji
+4. Update database to remove showcase record
+
+**On Item Sale:**
+1. When item is sold via normal sell flow
+2. Check if item is showcased
+3. If showcased, delete message from showcase thread
+4. Clean up showcase record in database
+
+**Reaction Behavior:**
+- Showcase emoji only works on inventory items that aren't already showcased
+- Un-showcase emoji only works on inventory items that are showcased
+- Clicking wrong emoji = no action (silent ignore)
+- Items in showcase thread have no special reactions (social interactions work normally)
+
+**Database Schema:**
+```sql
+-- Track showcased items
+CREATE TABLE showcased_items (
+  showcase_id INTEGER PRIMARY KEY,
+  player_id INTEGER NOT NULL,
+  inventory_id INTEGER NOT NULL,
+  showcase_message_id TEXT NOT NULL,  -- Discord message ID in showcase thread
+  showcased_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (player_id) REFERENCES players(player_id),
+  FOREIGN KEY (inventory_id) REFERENCES player_inventory(inventory_id),
+  UNIQUE(inventory_id)  -- Each item can only be showcased once
+);
+
+-- Track player showcase threads
+CREATE TABLE showcase_threads (
+  thread_id INTEGER PRIMARY KEY,
+  player_id INTEGER NOT NULL UNIQUE,
+  discord_thread_id TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (player_id) REFERENCES players(player_id)
+);
+```
+
+**Key Design Decisions:**
+- Use item IDs for tracking, never text extraction or regex
+- Fresh DB retrieval prevents stale data issues
+- Public threads encourage social interaction
+- 7-day archive keeps threads tidy without manual cleanup
+- Selling auto-removes showcase (no orphaned displays)
+
+**Implementation:**
+- [ ] Create #gallery-of-wonders channel (add to bootstrap)
+- [ ] Add showcase_threads and showcased_items tables to schema
+- [ ] Add showcase emoji reaction handler
+- [ ] Implement showcase thread creation (per-player, public, 7-day archive)
+- [ ] Post item to showcase thread (no special emojis)
+- [ ] Swap reactions on inventory item (showcase -> un-showcase)
+- [ ] Add un-showcase emoji reaction handler
+- [ ] Delete showcase message on un-showcase
+- [ ] Hook into sell flow to remove showcased items on sale
+- [ ] Add ShowcaseThread model (similar to InventoryThread)
 
 ---
 
@@ -615,6 +703,36 @@ ALTER TABLE npcs ADD COLUMN disabled_reason TEXT;
 
 ## Technical Debt & Future Work
 
+### URGENT: bot.js Refactoring
+**Priority: HIGH** - bot.js has grown too large (2400+ lines) and needs modular extraction.
+
+Proposed module structure:
+```
+src/
++-- bot.js                    # Entry point, Discord client setup, event routing
++-- handlers/
+|   +-- search.js             # Search flow (message handling, AI calls)
+|   +-- purchase.js           # Purchase reactions, inventory management
+|   +-- sell.js               # Sell flow, buyer generation, negotiation
+|   +-- craft.js              # Experimental crafting, synergy scoring
++-- services/
+|   +-- claude.js             # AI client wrapper, cost tracking
+|   +-- pricing.js            # Two-shot pricing system
+|   +-- inventory.js          # Inventory thread management
++-- ui/
+|   +-- selectionFlow.js      # Generic selection UI (already started)
+|   +-- embeds.js             # Discord embed formatting
++-- utils/
+    +-- prompts.js            # Prompt loading
+    +-- session.js            # Session management
+```
+
+- [ ] Extract handlers into separate modules
+- [ ] Create shared services layer
+- [ ] Move selection flow to ui/
+- [ ] Consolidate prompt loading
+- [ ] Add proper exports/imports
+
 ### Database
 - [ ] NPC tables and relationships
 - [ ] Alignment tracking columns
@@ -654,5 +772,5 @@ ALTER TABLE npcs ADD COLUMN disabled_reason TEXT;
 
 ---
 
-**Last Updated:** 2025-12-11
+**Last Updated:** 2025-12-14
 **Current Phase:** Phase 1 - Performance & Polish

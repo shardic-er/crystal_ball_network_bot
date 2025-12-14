@@ -30,8 +30,9 @@ Don't take it personally - it's all in good fun!
 ## Actions
 
 - **In #crystal-ball-network** - Type your search query to browse items
-- **In search threads** - Click 🛒 to purchase an item
-- **In inventory** - Click 💰 to sell an item back *(Phase 2 - coming soon)*
+- **In search threads** - Click the shopping cart to purchase an item
+- **In inventory** - Click the scales to sell an item back
+- **In #workshop** - Click the button to combine two items into something new
 
 ## Your Inventory Vault
 
